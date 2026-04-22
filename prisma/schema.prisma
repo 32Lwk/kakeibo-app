@@ -1,0 +1,264 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum MembershipRole {
+  owner
+  editor
+  viewer
+}
+
+enum TransactionType {
+  expense
+  income
+}
+
+enum ReceiptStatus {
+  pending
+  ocr_done
+  structured_done
+  confirmed
+  failed
+}
+
+model User {
+  id           String   @id @default(cuid())
+  email        String?  @unique
+  passwordHash String?
+  name         String?
+  image        String?
+  isAdmin      Boolean  @default(false)
+  weekStartsOn Int      @default(0) // 0=Sun, 1=Mon ... (user setting)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  accounts    Account[]
+  sessions    Session[]
+  memberships Membership[]
+  auditLogs   AuditLog[]
+  imports     Import[]
+}
+
+model Household {
+  id        String   @id @default(cuid())
+  name      String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  memberships  Membership[]
+  categories   Category[]
+  transactions Transaction[]
+  receipts     Receipt[]
+  imports      Import[]
+  attachments  Attachment[]
+}
+
+model Membership {
+  id        String         @id @default(cuid())
+  role      MembershipRole
+  createdAt DateTime       @default(now())
+
+  userId      String
+  householdId String
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  household   Household @relation(fields: [householdId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, householdId])
+  @@index([householdId])
+}
+
+model Category {
+  id        String   @id @default(cuid())
+  name      String
+  sortOrder Int      @default(0)
+  isDefault Boolean  @default(false)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  householdId String
+  household   Household @relation(fields: [householdId], references: [id], onDelete: Cascade)
+
+  splits       TransactionSplit[]
+  receiptItems ReceiptItem[]
+
+  @@unique([householdId, name])
+  @@index([householdId])
+}
+
+model Transaction {
+  id           String          @id @default(cuid())
+  type         TransactionType
+  purchaseDate DateTime
+  totalAmount  Int
+  memo         String?
+  accountType  String? // "cash" | "bank" | "credit" | "investment" (MVP: freeform)
+  createdAt    DateTime        @default(now())
+  updatedAt    DateTime        @updatedAt
+
+  householdId String
+  household   Household @relation(fields: [householdId], references: [id], onDelete: Cascade)
+
+  splits      TransactionSplit[]
+  refundFrom  Refund?            @relation("RefundOriginal")
+  refundTo    Refund?            @relation("RefundRefund")
+  attachments Attachment[]
+
+  @@index([householdId, purchaseDate])
+}
+
+model TransactionSplit {
+  id        String   @id @default(cuid())
+  amount    Int
+  note      String?
+  createdAt DateTime @default(now())
+
+  transactionId String
+  transaction   Transaction @relation(fields: [transactionId], references: [id], onDelete: Cascade)
+
+  categoryId String
+  category   Category @relation(fields: [categoryId], references: [id], onDelete: Restrict)
+
+  @@index([transactionId])
+  @@index([categoryId])
+}
+
+model Refund {
+  id        String   @id @default(cuid())
+  reason    String?
+  createdAt DateTime @default(now())
+
+  originalTransactionId String @unique
+  refundTransactionId   String @unique
+
+  originalTransaction Transaction @relation("RefundOriginal", fields: [originalTransactionId], references: [id], onDelete: Cascade)
+  refundTransaction   Transaction @relation("RefundRefund", fields: [refundTransactionId], references: [id], onDelete: Cascade)
+}
+
+model Receipt {
+  id             String        @id @default(cuid())
+  status         ReceiptStatus @default(pending)
+  purchaseDate   DateTime?
+  storeName      String?
+  totalAmount    Int?
+  ocrText        String?
+  structuredJson Json?
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+
+  householdId String
+  household   Household @relation(fields: [householdId], references: [id], onDelete: Cascade)
+
+  items       ReceiptItem[]
+  attachments Attachment[]
+
+  @@index([householdId, createdAt])
+}
+
+model ReceiptItem {
+  id        String   @id @default(cuid())
+  name      String
+  quantity  Int?
+  unitPrice Int?
+  amount    Int
+  createdAt DateTime @default(now())
+
+  receiptId String
+  receipt   Receipt @relation(fields: [receiptId], references: [id], onDelete: Cascade)
+
+  categoryId String?
+  category   Category? @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+
+  @@index([receiptId])
+}
+
+model Attachment {
+  id           String   @id @default(cuid())
+  kind         String // "transaction" | "receipt"
+  mimeType     String
+  fileName     String?
+  gcsObjectKey String
+  createdAt    DateTime @default(now())
+
+  householdId String
+  household   Household @relation(fields: [householdId], references: [id], onDelete: Cascade)
+
+  transactionId String?
+  transaction   Transaction? @relation(fields: [transactionId], references: [id], onDelete: Cascade)
+
+  receiptId String?
+  receipt   Receipt? @relation(fields: [receiptId], references: [id], onDelete: Cascade)
+
+  @@index([householdId, createdAt])
+}
+
+model Import {
+  id        String   @id @default(cuid())
+  source    String
+  fileName  String?
+  summary   Json?
+  createdAt DateTime @default(now())
+
+  householdId String
+  household   Household @relation(fields: [householdId], references: [id], onDelete: Cascade)
+
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Restrict)
+
+  @@index([householdId, createdAt])
+}
+
+model AuditLog {
+  id         String   @id @default(cuid())
+  action     String
+  entityType String
+  entityId   String
+  metadata   Json?
+  createdAt  DateTime @default(now())
+
+  userId String?
+  user   User?   @relation(fields: [userId], references: [id], onDelete: SetNull)
+}
+
+// NextAuth (Prisma adapter) models
+model Account {
+  id                String  @id @default(cuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String?
+  access_token      String?
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String?
+  session_state     String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+  @@index([userId])
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime
+
+  @@unique([identifier, token])
+}
