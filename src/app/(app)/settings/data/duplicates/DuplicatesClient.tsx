@@ -76,7 +76,9 @@ export function DuplicatesClient() {
   const [pendingKeepId, setPendingKeepId] = useState<string>("");
   const [pendingKeepIds, setPendingKeepIds] = useState<string[]>([]);
   const [pendingDeletePreview, setPendingDeletePreview] = useState<Tx[]>([]);
-  const [autoOpenFor, setAutoOpenFor] = useState<Group | null>(null);
+  /** 自動削除モーダル: 1グループのみ / 表示中の全グループ一括 */
+  const [autoModal, setAutoModal] = useState<null | { type: "single"; group: Group } | { type: "all" }>(null);
+  const [autoAllProgress, setAutoAllProgress] = useState<{ current: number; total: number } | null>(null);
   const [autoProgress, setAutoProgress] = useState(0); // 0-100
   const [autoPhase, setAutoPhase] = useState<"idle" | "rules" | "ai" | "ready">("idle");
   const [autoUsedAi, setAutoUsedAi] = useState(false);
@@ -99,7 +101,7 @@ export function DuplicatesClient() {
     setError("");
     try {
       const res = await fetch(
-        `/api/duplicates/groups?mode=${encodeURIComponent(mode)}&q=${encodeURIComponent(q)}&limit=30`,
+        `/api/duplicates/groups?mode=${encodeURIComponent(mode)}&q=${encodeURIComponent(q)}`,
         { cache: "no-store" },
       );
       const { json, text } = await readJsonSafe(res);
@@ -174,6 +176,57 @@ export function DuplicatesClient() {
     if (uniqueNonEmpty >= 3) return true;
     return false;
   }, []);
+
+  /** 1グループ分の「残す1件／削除ID」を決定（状態は更新しない）。単一・一括で共通。 */
+  const resolveGroupDeletion = useCallback(
+    async (g: Group): Promise<{ keepId: string; deleteIds: string[]; usedAi: boolean; reason: string }> => {
+      if (isTriviallyIdenticalGroup(g)) {
+        const keep = pickKeepFromTxs(g.txs);
+        return {
+          keepId: keep.id,
+          deleteIds: g.txs.filter((t) => t.id !== keep.id).map((t) => t.id),
+          usedAi: false,
+          reason: "",
+        };
+      }
+      if (isUncertainByRules(g)) {
+        try {
+          const res = await fetch("/api/duplicates/recommend", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ txs: g.txs }),
+          });
+          const { json, text } = await readJsonSafe(res);
+          if (!res.ok) throw new Error(String(json?.error ?? res.statusText ?? "AI推薦に失敗しました。"));
+          if (!json) throw new Error(text ? `不正なレスポンス: ${text.slice(0, 200)}` : "不正なレスポンスです。");
+          const keepId = String(json.keepId ?? "");
+          if (!keepId) throw new Error("keepId が取得できませんでした。");
+          return {
+            keepId,
+            deleteIds: g.txs.filter((t) => t.id !== keepId).map((t) => t.id),
+            usedAi: true,
+            reason: String(json.reason ?? ""),
+          };
+        } catch {
+          const keep = pickKeepFromTxs(g.txs);
+          return {
+            keepId: keep.id,
+            deleteIds: g.txs.filter((t) => t.id !== keep.id).map((t) => t.id),
+            usedAi: false,
+            reason: "",
+          };
+        }
+      }
+      const keep = pickKeepFromTxs(g.txs);
+      return {
+        keepId: keep.id,
+        deleteIds: g.txs.filter((t) => t.id !== keep.id).map((t) => t.id),
+        usedAi: false,
+        reason: "",
+      };
+    },
+    [isTriviallyIdenticalGroup, isUncertainByRules],
+  );
 
   const ignoreSelected = useCallback(async () => {
     if (selectedIgnoreKeys.length === 0) return;
@@ -278,7 +331,8 @@ export function DuplicatesClient() {
 
   const startAutoDuplicateDelete = useCallback(
     async (g: Group) => {
-      setAutoOpenFor(g);
+      setAutoModal({ type: "single", group: g });
+      setAutoAllProgress(null);
       setAutoPhase("rules");
       setAutoProgress(0);
       setAutoUsedAi(false);
@@ -316,11 +370,9 @@ export function DuplicatesClient() {
       setAutoProgress(70);
       try {
         const rec = await aiRecommendAndSelect(g);
-        // aiRecommendAndSelect already set pendingDeleteIds + selectedTx when usedAi.
         setAutoReason(rec.reason || "AIが残す1件を推薦しました。");
         setPendingKeepId(rec.keepId);
       } catch {
-        // fallback: keep rule selection
         setAutoUsedAi(false);
         setAutoReason("AI推薦に失敗したため、ルール結果を採用しました。");
       } finally {
@@ -330,6 +382,75 @@ export function DuplicatesClient() {
     },
     [aiRecommendAndSelect, applyRuleBasedSelection, isTriviallyIdenticalGroup, isUncertainByRules],
   );
+
+  /** 表示中の全グループについてルール→（必要なら）AIで削除候補をまとめる */
+  const startAutoDuplicateDeleteAll = useCallback(async () => {
+    if (groups.length === 0) return;
+    setAutoModal({ type: "all" });
+    setAutoAllProgress({ current: 1, total: groups.length });
+    setAutoPhase("rules");
+    setAutoProgress(0);
+    setAutoUsedAi(false);
+    setAutoReason("");
+    setPendingKeepId("");
+    setPendingKeepIds([]);
+    setPendingDeletePreview([]);
+    setPendingDeleteIds([]);
+    setError("");
+
+    await new Promise((r) => setTimeout(r, 50));
+
+    const allDelete: string[] = [];
+    const allKeep: string[] = [];
+    const preview: Tx[] = [];
+    let anyAi = false;
+    const n = groups.length;
+
+    try {
+      for (let i = 0; i < n; i++) {
+        const g = groups[i];
+        setAutoAllProgress({ current: i + 1, total: n });
+        setAutoProgress(Math.min(92, Math.round(((i + 0.35) / n) * 92)));
+
+        const resolved = await resolveGroupDeletion(g);
+        if (resolved.usedAi) anyAi = true;
+        allKeep.push(resolved.keepId);
+        allDelete.push(...resolved.deleteIds);
+        for (const id of resolved.deleteIds) {
+          const t = g.txs.find((x) => x.id === id);
+          if (t) preview.push(t);
+        }
+      }
+
+      setSelectedTx((prev) => {
+        const next = { ...prev };
+        for (const g of groups) {
+          for (const t of g.txs) {
+            next[t.id] = allDelete.includes(t.id);
+          }
+        }
+        return next;
+      });
+      setPendingDeleteIds(allDelete);
+      setPendingKeepIds(allKeep);
+      setPendingKeepId(allKeep[0] ?? "");
+      setPendingDeletePreview(preview);
+      setAutoUsedAi(anyAi);
+      setAutoReason(
+        anyAi
+          ? `表示中の ${n} グループを処理しました（一部AI使用）。削除候補は合計 ${allDelete.length} 件、各グループで1件ずつ残します。`
+          : `表示中の ${n} グループをルールで処理しました。削除候補は合計 ${allDelete.length} 件、各グループで1件ずつ残します。`,
+      );
+      setAutoPhase("ready");
+      setAutoProgress(100);
+      setAutoAllProgress(null);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+      setAutoModal(null);
+      setAutoPhase("idle");
+      setAutoAllProgress(null);
+    }
+  }, [groups, resolveGroupDeletion]);
 
   return (
     <div className="space-y-6">
@@ -393,15 +514,10 @@ export function DuplicatesClient() {
               <button
                 type="button"
                 className="rounded-xl bg-red-600 px-4 py-2 text-sm font-medium text-white hover:bg-red-700 disabled:opacity-50"
-                onClick={async () => {
-                  // 一括: 表示中グループを上から順に処理（ルール→必要ならAI）
-                  if (groups.length === 0) return;
-                  // まず最初のグループから処理（長時間になるため段階的に実行）
-                  await startAutoDuplicateDelete(groups[0]);
-                }}
+                onClick={() => void startAutoDuplicateDeleteAll()}
                 disabled={loading || groups.length === 0}
               >
-                重複削除（最初のグループ）
+                重複削除（全グループ）
               </button>
             </div>
           </div>
@@ -409,7 +525,15 @@ export function DuplicatesClient() {
 
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div className="text-sm text-black/60">
-            表示グループ: <span className="font-medium tabular-nums text-black/80">{groups.length}</span>
+            検索・絞り込み条件に該当する重複グループ:{" "}
+            {loading ? (
+              <span className="text-black/45">…</span>
+            ) : (
+              <>
+                <span className="font-medium tabular-nums text-black/80">{groups.length}</span>
+                <span className="font-medium text-black/80"> 件</span>
+              </>
+            )}
           </div>
           <div className="flex flex-wrap items-center gap-2">
             <button
@@ -606,16 +730,20 @@ export function DuplicatesClient() {
         </div>
       ) : null}
 
-      {autoOpenFor ? (
+      {autoModal ? (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-5">
           <div className="w-full max-w-md rounded-2xl border border-black/10 bg-white p-5 shadow-xl">
-            <div className="text-sm font-semibold">重複削除（自動選択）</div>
+            <div className="text-sm font-semibold">
+              {autoModal.type === "all" ? "重複削除（全グループ・自動選択）" : "重複削除（自動選択）"}
+            </div>
             <div className="mt-2 text-sm text-black/70">
-              {autoPhase === "rules"
-                ? "ルールで削除候補を選んでいます…"
-                : autoPhase === "ai"
-                  ? "迷いがあるためAIで確認しています…"
-                  : "削除候補が決まりました。内容を確認してください。"}
+              {autoModal.type === "all" && autoAllProgress
+                ? `処理中: ${autoAllProgress.current} / ${autoAllProgress.total} グループ`
+                : autoPhase === "rules"
+                  ? "ルールで削除候補を選んでいます…"
+                  : autoPhase === "ai"
+                    ? "迷いがあるためAIで確認しています…"
+                    : "削除候補が決まりました。内容を確認してください。"}
             </div>
 
             <div className="mt-4 space-y-2">
@@ -634,12 +762,33 @@ export function DuplicatesClient() {
                 <div className="text-black/60">削除候補</div>
                 <div className="tabular-nums">{pendingDeleteIds.length} 件</div>
               </div>
-              {pendingKeepId ? (
+              {autoModal.type === "single" && pendingKeepId ? (
                 <div className="mt-2 text-xs text-black/50">
                   残す:{" "}
                   <a className="hover:underline" href={`/transactions/${pendingKeepId}`}>
                     明細を見る
                   </a>
+                </div>
+              ) : null}
+              {autoModal.type === "all" && pendingKeepIds.length > 0 ? (
+                <div className="mt-2 space-y-1 text-xs text-black/50">
+                  <div>
+                    残す明細（各グループ1件・計 <span className="tabular-nums">{pendingKeepIds.length}</span> 件）
+                  </div>
+                  <div className="grid max-h-[100px] gap-0.5 overflow-auto">
+                    {pendingKeepIds.slice(0, 8).map((id) => {
+                      const t = groups.flatMap((gg) => gg.txs).find((x) => x.id === id);
+                      if (!t) return null;
+                      return (
+                        <a key={id} href={`/transactions/${id}`} className="truncate hover:underline">
+                          {toYmd(t.purchaseDate)} / ¥{yen(t.totalAmount)} / {t.memo ?? "（メモなし）"}
+                        </a>
+                      );
+                    })}
+                  </div>
+                  {pendingKeepIds.length > 8 ? (
+                    <div className="text-black/40">…他 {pendingKeepIds.length - 8} 件</div>
+                  ) : null}
                 </div>
               ) : null}
               <div className="mt-1 text-xs text-black/50">
@@ -651,8 +800,10 @@ export function DuplicatesClient() {
               <button
                 type="button"
                 className="rounded-xl border border-black/15 bg-white px-4 py-2 text-sm font-medium hover:bg-black/[0.03]"
-                onClick={() => setAutoOpenFor(null)}
-                disabled={loading}
+                onClick={() => {
+                  setAutoModal(null);
+                  setAutoAllProgress(null);
+                }}
               >
                 閉じる
               </button>
@@ -660,7 +811,8 @@ export function DuplicatesClient() {
                 type="button"
                 className="rounded-xl bg-red-600 px-4 py-2 text-sm font-medium text-white hover:bg-red-700 disabled:opacity-50"
                 onClick={() => {
-                  setAutoOpenFor(null);
+                  setAutoModal(null);
+                  setAutoAllProgress(null);
                   setConfirmOpen(true);
                 }}
                 disabled={loading || autoPhase !== "ready" || pendingDeleteIds.length === 0}

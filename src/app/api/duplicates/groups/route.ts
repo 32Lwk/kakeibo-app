@@ -17,10 +17,15 @@ function normalizeGroupDay(dayRaw: unknown): string | null {
   return m ? m[1] : null;
 }
 
-function clampInt(v: string | null, def: number, min: number, max: number) {
-  const n = Number(v ?? "");
-  if (!Number.isFinite(n)) return def;
-  return Math.max(min, Math.min(max, Math.trunc(n)));
+/** 明示時のみグループ件数を上限。未指定・空・0 は上限なし（SQL に LIMIT なし）。 */
+const MAX_DUPLICATE_GROUPS_CAP = 500_000;
+
+function parseOptionalGroupCap(v: string | null): number | null {
+  const t = (v ?? "").trim();
+  if (t === "" || t === "0") return null;
+  const n = Number(t);
+  if (!Number.isFinite(n)) return null;
+  return Math.max(1, Math.min(MAX_DUPLICATE_GROUPS_CAP, Math.trunc(n)));
 }
 
 export async function GET(req: Request) {
@@ -31,7 +36,8 @@ export async function GET(req: Request) {
     const url = new URL(req.url);
     const mode = (url.searchParams.get("mode") ?? "amount").toLowerCase(); // amount | datetime | both
     const q = (url.searchParams.get("q") ?? "").trim();
-    const limit = clampInt(url.searchParams.get("limit"), 30, 1, 100);
+    const groupCap = parseOptionalGroupCap(url.searchParams.get("limit"));
+    const groupLimitSql = groupCap != null ? Prisma.sql`LIMIT ${groupCap}` : Prisma.empty;
 
     const ignoreRows = await prisma.duplicateIgnore.findMany({
       where: { householdId: ctx.householdId },
@@ -73,7 +79,7 @@ export async function GET(req: Request) {
                 GROUP BY DATE("purchaseDate")
                 HAVING COUNT(*) > 1
                 ORDER BY COUNT(*) DESC
-                LIMIT ${limit}
+                ${groupLimitSql}
               `,
             )) as Array<{ day: string; count: number }>);
 
@@ -83,7 +89,6 @@ export async function GET(req: Request) {
         const candidates = await prisma.transaction.findMany({
           where: whereBase,
           select: { purchaseDate: true },
-          take: 5000,
         });
         const m = new Map<string, number>();
         for (const t of candidates) {
@@ -94,7 +99,7 @@ export async function GET(req: Request) {
         const arr = Array.from(m.entries())
           .filter(([, c]) => c > 1)
           .sort((a, b) => b[1] - a[1])
-          .slice(0, limit)
+          .slice(0, groupCap ?? undefined)
           .map(([day, count]) => ({ day, count }));
         groups.splice(0, groups.length, ...arr);
       }
@@ -110,7 +115,6 @@ export async function GET(req: Request) {
         const txs = await prisma.transaction.findMany({
           where: { householdId: ctx.householdId, purchaseDate: { gte: start, lt: end } },
           orderBy: { createdAt: "asc" },
-          take: 30,
           select: { id: true, purchaseDate: true, createdAt: true, type: true, totalAmount: true, memo: true },
         });
         out.push({ key: day, label: `日時: ${day}`, ignoreKey, count: (g as any).count ?? txs.length, txs });
@@ -136,7 +140,7 @@ export async function GET(req: Request) {
                 GROUP BY DATE("purchaseDate"), "type", "totalAmount", COALESCE("memo", '')
                 HAVING COUNT(*) > 1
                 ORDER BY COUNT(*) DESC
-                LIMIT ${limit}
+                ${groupLimitSql}
               `,
             )) as Array<{ day: string; type: string; totalAmount: number; memo: string; count: number }>);
 
@@ -145,7 +149,6 @@ export async function GET(req: Request) {
         const candidates = await prisma.transaction.findMany({
           where: whereBase,
           select: { purchaseDate: true, type: true, totalAmount: true, memo: true },
-          take: 5000,
         });
         const m = new Map<string, { day: string; type: string; totalAmount: number; memo: string; count: number }>();
         for (const t of candidates) {
@@ -159,7 +162,7 @@ export async function GET(req: Request) {
         }
         const arr = Array.from(m.values()).filter((x) => x.count > 1);
         arr.sort((a, b) => b.count - a.count);
-        groups.splice(0, groups.length, ...arr.slice(0, limit));
+        groups.splice(0, groups.length, ...(groupCap != null ? arr.slice(0, groupCap) : arr));
       }
 
       const out = [];
@@ -185,7 +188,6 @@ export async function GET(req: Request) {
               AND "totalAmount" = ${amt}
               AND COALESCE("memo", '') = ${memoNorm}
             ORDER BY "createdAt" ASC
-            LIMIT 30
           `,
         )) as Array<{
           id: string;
@@ -222,7 +224,7 @@ export async function GET(req: Request) {
               GROUP BY "type", "totalAmount"
               HAVING COUNT(*) > 1
               ORDER BY COUNT(*) DESC
-              LIMIT ${limit}
+              ${groupLimitSql}
             `,
           )) as Array<{ type: string; totalAmount: number; count: number }>);
 
@@ -231,7 +233,6 @@ export async function GET(req: Request) {
       const candidates = await prisma.transaction.findMany({
         where: whereBase,
         select: { type: true, totalAmount: true },
-        take: 5000,
       });
       const m = new Map<string, { type: string; totalAmount: number; count: number }>();
       for (const t of candidates) {
@@ -242,7 +243,7 @@ export async function GET(req: Request) {
       }
       const arr = Array.from(m.values()).filter((x) => x.count > 1);
       arr.sort((a, b) => b.count - a.count);
-      groups.splice(0, groups.length, ...arr.slice(0, limit));
+      groups.splice(0, groups.length, ...(groupCap != null ? arr.slice(0, groupCap) : arr));
     }
 
     const out = [];
@@ -256,7 +257,6 @@ export async function GET(req: Request) {
       const txs = await prisma.transaction.findMany({
         where: { householdId: ctx.householdId, totalAmount: amt, type },
         orderBy: { purchaseDate: "asc" },
-        take: 30,
         select: { id: true, purchaseDate: true, createdAt: true, type: true, totalAmount: true, memo: true },
       });
       const signedPrefix = type === "expense" ? "-" : "+";
