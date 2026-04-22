@@ -4,11 +4,11 @@ import { signOut } from "next-auth/react";
 
 export function UserMenu({ email }: { email?: string | null }) {
   return (
-    <div className="ml-auto flex items-center gap-3 text-sm">
-      <span className="text-black/60">{email}</span>
+    <div className="flex items-center gap-3 text-sm">
+      <span className="hidden text-black/60 lg:inline">{email}</span>
       <button
         onClick={() => void signOut({ callbackUrl: "/login" })}
-        className="rounded-lg border border-black/15 px-3 py-1.5 hover:bg-black/[0.03]"
+        className="rounded-xl border border-black/10 bg-white px-3 py-1.5 font-medium text-black/80 hover:bg-black/[0.05] hover:text-black"
       >
         ログアウト
       </button>

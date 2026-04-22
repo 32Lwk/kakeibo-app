@@ -17,6 +17,12 @@ enum TransactionType {
   income
 }
 
+enum GeneratedKind {
+  recurring
+  carryover_account
+  carryover_category
+}
+
 enum ReceiptStatus {
   pending
   ocr_done
@@ -28,11 +34,19 @@ enum ReceiptStatus {
 model User {
   id           String   @id @default(cuid())
   email        String?  @unique
+  emailVerified DateTime?
   passwordHash String?
   name         String?
   image        String?
   isAdmin      Boolean  @default(false)
   weekStartsOn Int      @default(0) // 0=Sun, 1=Mon ... (user setting)
+  theme        String   @default("system") // system | light | dark
+  accent       String?  // e.g. "indigo" (optional)
+  transactionSort String @default("date_desc") // date_desc | date_asc | amount_desc | amount_asc
+  summaryOrder String   @default("expense_first") // expense_first | income_first
+  carryoverEnabled Boolean @default(true)
+  carryoverNote  String? // freeform memo for rules (MVP)
+  recurringAutoApply Boolean @default(true)
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 
@@ -41,6 +55,7 @@ model User {
   memberships Membership[]
   auditLogs   AuditLog[]
   imports     Import[]
+  duplicateIgnores DuplicateIgnore[]
 }
 
 model Household {
@@ -52,9 +67,11 @@ model Household {
   memberships  Membership[]
   categories   Category[]
   transactions Transaction[]
+  recurringRules RecurringRule[]
   receipts     Receipt[]
   imports      Import[]
   attachments  Attachment[]
+  duplicateIgnores DuplicateIgnore[]
 }
 
 model Membership {
@@ -84,6 +101,7 @@ model Category {
 
   splits       TransactionSplit[]
   receiptItems ReceiptItem[]
+  recurringRules RecurringRule[]
 
   @@unique([householdId, name])
   @@index([householdId])
@@ -99,6 +117,11 @@ model Transaction {
   createdAt    DateTime        @default(now())
   updatedAt    DateTime        @updatedAt
 
+  // generated (recurring/carryover) - for idempotency
+  generatedKind  GeneratedKind?
+  generatedMonth String? // YYYY-MM
+  generatedKey   String? // ruleId / accountType / categoryId
+
   householdId String
   household   Household @relation(fields: [householdId], references: [id], onDelete: Cascade)
 
@@ -107,7 +130,34 @@ model Transaction {
   refundTo    Refund?            @relation("RefundRefund")
   attachments Attachment[]
 
+  recurringRuleId String?
+  recurringRule   RecurringRule? @relation(fields: [recurringRuleId], references: [id], onDelete: SetNull)
+
   @@index([householdId, purchaseDate])
+  @@unique([householdId, generatedKind, generatedMonth, generatedKey])
+}
+
+model RecurringRule {
+  id         String   @id @default(cuid())
+  isActive   Boolean  @default(true)
+  type       TransactionType
+  dayOfMonth Int      // 1-28
+  amount     Int      // positive
+  memo       String?
+  accountType String? // cash/bank/etc
+  startMonth String   @default("1970-01") // YYYY-MM
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  householdId String
+  household   Household @relation(fields: [householdId], references: [id], onDelete: Cascade)
+
+  categoryId String?
+  category   Category? @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+
+  transactions Transaction[]
+
+  @@index([householdId, isActive])
 }
 
 model TransactionSplit {
@@ -221,6 +271,27 @@ model AuditLog {
 
   userId String?
   user   User?   @relation(fields: [userId], references: [id], onDelete: SetNull)
+}
+
+enum DuplicateIgnoreKind {
+  amount
+  datetime
+}
+
+model DuplicateIgnore {
+  id        String              @id @default(cuid())
+  kind      DuplicateIgnoreKind
+  value     String
+  createdAt DateTime            @default(now())
+
+  householdId String
+  household   Household @relation(fields: [householdId], references: [id], onDelete: Cascade)
+
+  userId String
+  user   User @relation(fields: [userId], references: [id], onDelete: Restrict)
+
+  @@unique([householdId, kind, value])
+  @@index([householdId, createdAt])
 }
 
 // NextAuth (Prisma adapter) models
