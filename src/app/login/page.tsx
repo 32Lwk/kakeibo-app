@@ -72,7 +72,7 @@ export default function LoginPage() {
             void signIn("google", { callbackUrl: "/dashboard" });
           }}
         >
-          <button className="w-full rounded-xl border border-black/15 px-3 py-2 hover:bg-black/[0.03]">
+          <button className="w-full rounded-xl border border-black/15 bg-white px-3 py-2 text-black hover:bg-black/[0.03] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-black/30">
             Googleでログイン
           </button>
         </form>

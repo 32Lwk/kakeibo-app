@@ -6,7 +6,7 @@
 
 ### 必要なもの
 - Node.js（推奨: 20以上）
-- PostgreSQL（ローカルにあるもの、またはDocker）
+- PostgreSQL（推奨: **Neon**。またはローカル/ Docker）
 
 ```bash
 npm install
@@ -21,18 +21,26 @@ cp .env.example .env
 
 最低限 `DATABASE_URL` と `NEXTAUTH_SECRET` を設定してください。
 
-2) PostgreSQL起動（Dockerの場合）
+2) DB接続（推奨: Neon）
+
+- Neon のダッシュボードで接続文字列を取得し、`.env` に設定します
+  - **`DATABASE_URL`**: Neon の接続文字列（**Pooled** / **Direct** どちらでもOK）
+
+※ Neon は SSL 必須のため、接続文字列に `sslmode=require` を付けてください（`.env.example` の例どおり）。
+
+（任意）ローカルPostgreSQLを使う場合
+- 手元のPostgreSQLを起動し、`.env` の `DATABASE_URL` を合わせてください。
+
+（任意）DockerでPostgreSQLを立てる場合
 
 ```bash
 docker compose up -d
 ```
 
-※ Dockerが使えない場合は、手元のPostgreSQLを起動し `.env` の `DATABASE_URL` を合わせてください。
-
 3) マイグレーション
 
 ```bash
-npm run prisma:migrate
+npm run prisma:migrate -- --name init
 ```
 
 ### 開発サーバ起動
