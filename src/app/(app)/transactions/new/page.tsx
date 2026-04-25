@@ -1,7 +1,7 @@
 import { prisma } from "@/lib/db";
 import { redirect } from "next/navigation";
 import { z } from "zod";
-import { requireAuthedContext, requireRole } from "@/lib/authz";
+import { requireAuthedContext, requireRole, scopedTx } from "@/lib/authz";
 import { TransactionForm } from "@/components/TransactionForm";
 
 export const dynamic = "force-dynamic";
@@ -15,7 +15,7 @@ const schema = z.object({
 });
 
 export default async function NewTransactionPage() {
-  const ctx = await requireAuthedContext();
+  const ctx = await requireAuthedContext({ onUnauthorized: "redirect" });
   requireRole(ctx, "editor");
 
   const categories = await prisma.category.findMany({
@@ -30,6 +30,7 @@ export default async function NewTransactionPage() {
     "use server";
     const ctx = await requireAuthedContext();
     requireRole(ctx, "editor");
+    const { householdId, layerId } = scopedTx(ctx);
     const parsed = schema.safeParse({
       type: formData.get("type"),
       purchaseDate: formData.get("purchaseDate"),
@@ -59,7 +60,8 @@ export default async function NewTransactionPage() {
 
     const tx = await prisma.transaction.create({
       data: {
-        householdId: ctx.householdId,
+        householdId,
+        layerId,
         type: raw.type,
         purchaseDate,
         totalAmount: raw.totalAmount,

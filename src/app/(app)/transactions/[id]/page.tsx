@@ -1,5 +1,5 @@
 import { prisma } from "@/lib/db";
-import { requireAuthedContext, requireRole } from "@/lib/authz";
+import { requireAuthedContext, requireRole, scopedTx } from "@/lib/authz";
 import { redirect } from "next/navigation";
 import { z } from "zod";
 import { TransactionForm } from "@/components/TransactionForm";
@@ -26,7 +26,8 @@ export default async function TransactionDetailPage({
   params: Promise<{ id: string }>;
   searchParams?: Promise<Record<string, string | string[] | undefined>>;
 }) {
-  const ctx = await requireAuthedContext();
+  const ctx = await requireAuthedContext({ onUnauthorized: "redirect" });
+  const txWhere = scopedTx(ctx);
   const { id } = await params;
   const sp = searchParams ? await searchParams : undefined;
   const backRaw = sp?.back;
@@ -35,7 +36,7 @@ export default async function TransactionDetailPage({
     back.startsWith("/") && !back.startsWith("//") && !back.includes("\n") && !back.includes("\r") ? back : "";
 
   const tx = await prisma.transaction.findFirst({
-    where: { id, householdId: ctx.householdId },
+    where: { id, ...txWhere },
     select: {
       id: true,
       type: true,
@@ -69,6 +70,7 @@ export default async function TransactionDetailPage({
     "use server";
     const ctx = await requireAuthedContext();
     requireRole(ctx, "editor");
+    const scope = scopedTx(ctx);
 
     const parsed = updateSchema.safeParse({
       type: formData.get("type"),
@@ -103,7 +105,7 @@ export default async function TransactionDetailPage({
     if (splits.data.some((s) => !categoryIds.has(s.categoryId))) throw new Error("カテゴリが不正です。");
 
     const current = await prisma.transaction.findFirst({
-      where: { id, householdId: ctx.householdId },
+      where: { id, ...scope },
       select: { id: true },
     });
     if (!current) throw new Error("明細が見つかりません。");
@@ -171,9 +173,10 @@ export default async function TransactionDetailPage({
             "use server";
             const ctx = await requireAuthedContext();
             requireRole(ctx, "editor");
+            const scope = scopedTx(ctx);
 
             const current = await prisma.transaction.findFirst({
-              where: { id, householdId: ctx.householdId },
+              where: { id, ...scope },
               select: { id: true, refundTo: { select: { id: true } } },
             });
             if (!current) throw new Error("明細が見つかりません。");
@@ -181,7 +184,7 @@ export default async function TransactionDetailPage({
 
             const original = await prisma.transaction.findUnique({
               where: { id: current.id },
-              select: { id: true, type: true, purchaseDate: true, totalAmount: true, memo: true },
+              select: { id: true, type: true, purchaseDate: true, totalAmount: true, memo: true, layerId: true },
             });
             if (!original) throw new Error("明細が見つかりません。");
 
@@ -192,6 +195,7 @@ export default async function TransactionDetailPage({
               const refundTx = await txPrisma.transaction.create({
                 data: {
                   householdId: ctx.householdId,
+                  layerId: original.layerId,
                   type: refundType,
                   purchaseDate: new Date(),
                   totalAmount: original.totalAmount,
@@ -247,9 +251,10 @@ export default async function TransactionDetailPage({
             "use server";
             const ctx = await requireAuthedContext();
             requireRole(ctx, "editor");
+            const scope = scopedTx(ctx);
 
             const current = await prisma.transaction.findFirst({
-              where: { id, householdId: ctx.householdId },
+              where: { id, ...scope },
               select: { id: true },
             });
             if (!current) throw new Error("明細が見つかりません。");

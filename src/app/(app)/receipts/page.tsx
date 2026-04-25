@@ -1,13 +1,14 @@
 import { prisma } from "@/lib/db";
-import { requireAuthedContext } from "@/lib/authz";
+import { requireAuthedContext, scopedTx } from "@/lib/authz";
 
 export const dynamic = "force-dynamic";
 
 export default async function ReceiptsPage() {
-  const ctx = await requireAuthedContext();
+  const ctx = await requireAuthedContext({ onUnauthorized: "redirect" });
+  const rxWhere = scopedTx(ctx);
 
   const receipts = await prisma.receipt.findMany({
-    where: { householdId: ctx.householdId },
+    where: { ...rxWhere },
     orderBy: { createdAt: "desc" },
     take: 50,
     select: {

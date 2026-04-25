@@ -15,7 +15,7 @@ const renameSchema = z.object({
 });
 
 export default async function CategoriesPage() {
-  const ctx = await requireAuthedContext();
+  const ctx = await requireAuthedContext({ onUnauthorized: "redirect" });
   requireRole(ctx, "owner");
 
   const categories = await prisma.category.findMany({

@@ -1,5 +1,5 @@
 import { prisma } from "@/lib/db";
-import { requireAuthedContext } from "@/lib/authz";
+import { requireAuthedContext, scopedTx } from "@/lib/authz";
 
 export const dynamic = "force-dynamic";
 
@@ -8,23 +8,24 @@ function yen(n: number) {
 }
 
 export default async function DataSettingsPage() {
-  const ctx = await requireAuthedContext();
+  const ctx = await requireAuthedContext({ onUnauthorized: "redirect" });
+  const txWhere = scopedTx(ctx);
 
   const [txCount, firstTx, lastTx, sums, importCount, latestImport] = await Promise.all([
-    prisma.transaction.count({ where: { householdId: ctx.householdId } }),
+    prisma.transaction.count({ where: { ...txWhere } }),
     prisma.transaction.findFirst({
-      where: { householdId: ctx.householdId },
+      where: { ...txWhere },
       orderBy: { purchaseDate: "asc" },
       select: { purchaseDate: true },
     }),
     prisma.transaction.findFirst({
-      where: { householdId: ctx.householdId },
+      where: { ...txWhere },
       orderBy: { purchaseDate: "desc" },
       select: { purchaseDate: true },
     }),
     prisma.transaction.groupBy({
       by: ["type"],
-      where: { householdId: ctx.householdId },
+      where: { ...txWhere },
       _sum: { totalAmount: true },
     }),
     prisma.import.count({ where: { householdId: ctx.householdId } }),

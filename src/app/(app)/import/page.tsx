@@ -4,7 +4,7 @@ import { ImportStartClient } from "./ImportStartClient";
 export const dynamic = "force-dynamic";
 
 export default async function ImportPage() {
-  const ctx = await requireAuthedContext();
+  const ctx = await requireAuthedContext({ onUnauthorized: "redirect" });
   requireRole(ctx, "editor");
 
   return (

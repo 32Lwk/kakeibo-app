@@ -1,5 +1,5 @@
 import { prisma } from "@/lib/db";
-import { requireAuthedContext, requireRole } from "@/lib/authz";
+import { requireAuthedContext, requireRole, scopedTx } from "@/lib/authz";
 import { Prisma, TransactionType } from "@prisma/client";
 
 /** Raw SQL / pg may return DATE as Date, string, or other — normalize to YYYY-MM-DD for filters. */
@@ -32,6 +32,7 @@ export async function GET(req: Request) {
   try {
     const ctx = await requireAuthedContext();
     requireRole(ctx, "editor");
+    const txw = scopedTx(ctx);
 
     const url = new URL(req.url);
     const mode = (url.searchParams.get("mode") ?? "amount").toLowerCase(); // amount | datetime | both
@@ -46,7 +47,7 @@ export async function GET(req: Request) {
     const ignoreSet = new Set(ignoreRows.map((r) => `${r.kind}:${r.value}`));
 
     // Narrow candidates when q is provided (memo contains / amount exact / date exact).
-    const whereBase: any = { householdId: ctx.householdId };
+    const whereBase: any = { ...txw };
     if (q) {
       const amountMaybe = Number(q);
       const dateMaybe = /^\d{4}-\d{2}-\d{2}$/.test(q) ? new Date(q) : null;
@@ -75,7 +76,7 @@ export async function GET(req: Request) {
               Prisma.sql`
                 SELECT DATE("purchaseDate") AS "day", COUNT(*)::int AS "count"
                 FROM "Transaction"
-                WHERE "householdId" = ${ctx.householdId}
+                WHERE "householdId" = ${txw.householdId} AND "layerId" = ${txw.layerId}
                 GROUP BY DATE("purchaseDate")
                 HAVING COUNT(*) > 1
                 ORDER BY COUNT(*) DESC
@@ -113,7 +114,7 @@ export async function GET(req: Request) {
         const start = new Date(y, mo - 1, d);
         const end = new Date(y, mo - 1, d + 1);
         const txs = await prisma.transaction.findMany({
-          where: { householdId: ctx.householdId, purchaseDate: { gte: start, lt: end } },
+          where: { ...txw, purchaseDate: { gte: start, lt: end } },
           orderBy: { createdAt: "asc" },
           select: { id: true, purchaseDate: true, createdAt: true, type: true, totalAmount: true, memo: true },
         });
@@ -136,7 +137,7 @@ export async function GET(req: Request) {
                   COALESCE("memo", '') AS "memo",
                   COUNT(*)::int AS "count"
                 FROM "Transaction"
-                WHERE "householdId" = ${ctx.householdId}
+                WHERE "householdId" = ${txw.householdId} AND "layerId" = ${txw.layerId}
                 GROUP BY DATE("purchaseDate"), "type", "totalAmount", COALESCE("memo", '')
                 HAVING COUNT(*) > 1
                 ORDER BY COUNT(*) DESC
@@ -182,7 +183,7 @@ export async function GET(req: Request) {
           Prisma.sql`
             SELECT id, "purchaseDate", "createdAt", "type", "totalAmount", "memo"
             FROM "Transaction"
-            WHERE "householdId" = ${ctx.householdId}
+            WHERE "householdId" = ${txw.householdId} AND "layerId" = ${txw.layerId}
               AND DATE("purchaseDate") = CAST(${day} AS date)
               AND "type"::text = ${type}
               AND "totalAmount" = ${amt}
@@ -220,7 +221,7 @@ export async function GET(req: Request) {
             Prisma.sql`
               SELECT "type", "totalAmount", COUNT(*)::int AS "count"
               FROM "Transaction"
-              WHERE "householdId" = ${ctx.householdId}
+              WHERE "householdId" = ${txw.householdId} AND "layerId" = ${txw.layerId}
               GROUP BY "type", "totalAmount"
               HAVING COUNT(*) > 1
               ORDER BY COUNT(*) DESC
@@ -255,7 +256,7 @@ export async function GET(req: Request) {
       const ignoreKey = `amount:${type}|${amt}`;
       if (ignoreSet.has(ignoreKey)) continue;
       const txs = await prisma.transaction.findMany({
-        where: { householdId: ctx.householdId, totalAmount: amt, type },
+        where: { ...txw, totalAmount: amt, type },
         orderBy: { purchaseDate: "asc" },
         select: { id: true, purchaseDate: true, createdAt: true, type: true, totalAmount: true, memo: true },
       });

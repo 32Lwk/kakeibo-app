@@ -1,5 +1,5 @@
 import { prisma } from "@/lib/db";
-import { requireAuthedContext } from "@/lib/authz";
+import { requireAuthedContext, scopedTx } from "@/lib/authz";
 
 export const dynamic = "force-dynamic";
 
@@ -20,6 +20,7 @@ function escapeCsv(value: string) {
 export async function GET(req: Request) {
   const ctx = await requireAuthedContext().catch(() => null);
   if (!ctx) return new Response("Unauthorized", { status: 401 });
+  const txWhere = scopedTx(ctx);
 
   const url = new URL(req.url);
   const from = url.searchParams.get("from"); // YYYY-MM-DD
@@ -30,7 +31,7 @@ export async function GET(req: Request) {
 
   const txs = await prisma.transaction.findMany({
     where: {
-      householdId: ctx.householdId,
+      ...txWhere,
       ...(fromDate || endExclusive
         ? {
             purchaseDate: {

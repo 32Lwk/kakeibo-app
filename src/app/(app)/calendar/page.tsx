@@ -1,5 +1,5 @@
 import { prisma } from "@/lib/db";
-import { requireAuthedContext } from "@/lib/authz";
+import { requireAuthedContext, scopedTx } from "@/lib/authz";
 import { CalendarHeader } from "@/components/CalendarHeader";
 
 export const dynamic = "force-dynamic";
@@ -44,7 +44,8 @@ export default async function CalendarPage({
 }: {
   searchParams?: Promise<Record<string, string | string[] | undefined>>;
 }) {
-  const ctx = await requireAuthedContext();
+  const ctx = await requireAuthedContext({ onUnauthorized: "redirect" });
+  const txWhere = scopedTx(ctx);
   const unwrapped = searchParams ? await searchParams : undefined;
   const { year, monthIndex } = parseMonth(unwrapped);
   const q = (typeof unwrapped?.q === "string" ? unwrapped.q : Array.isArray(unwrapped?.q) ? unwrapped?.q[0] : "").trim();
@@ -60,7 +61,7 @@ export default async function CalendarPage({
   const monthParam = toMonthParam(year, monthIndex);
 
   const txs = await prisma.transaction.findMany({
-    where: { householdId: ctx.householdId, purchaseDate: { gte: start, lt: end } },
+    where: { ...txWhere, purchaseDate: { gte: start, lt: end } },
     select: { purchaseDate: true, type: true, totalAmount: true },
   });
 
@@ -96,7 +97,7 @@ export default async function CalendarPage({
 
   const monthTxs = await prisma.transaction.findMany({
     where: {
-      householdId: ctx.householdId,
+      ...txWhere,
       purchaseDate: { gte: start, lt: end },
       ...(q
         ? {
