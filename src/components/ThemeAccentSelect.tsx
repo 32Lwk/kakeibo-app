@@ -32,7 +32,7 @@ export function ThemeAccentSelect({
 
   return (
     <div className="grid gap-4 md:grid-cols-2">
-      <div className="space-y-1">
+      <div className="min-w-0 space-y-1">
         <label className="text-sm font-medium" htmlFor="theme">
           画面テーマ
         </label>
@@ -49,7 +49,7 @@ export function ThemeAccentSelect({
         </select>
       </div>
 
-      <div className="space-y-1">
+      <div className="min-w-0 space-y-1">
         <label className="text-sm font-medium" htmlFor="accent">
           アクセントカラー
         </label>
@@ -66,16 +66,17 @@ export function ThemeAccentSelect({
             </option>
           ))}
         </select>
-        <div className="flex items-center justify-between gap-3">
-          <div className="text-xs text-black/50">選択内容は「保存」で反映されます（この画面ではプレビューのみ即時）。</div>
-          <div className="flex items-center gap-2">
-            <div className="text-xs text-black/50">プレビュー</div>
-            <div
-              className="h-4 w-8 rounded-full border border-black/15"
-              style={{ backgroundColor: "var(--accent)" }}
-              aria-label="アクセントカラープレビュー"
-            />
-          </div>
+      </div>
+
+      <div className="flex flex-col gap-2 text-xs text-black/50 md:col-span-2 md:flex-row md:items-center md:justify-between">
+        <div>選択内容は「保存」で反映されます（この画面ではプレビューのみ即時）。</div>
+        <div className="flex items-center gap-2">
+          <div>プレビュー</div>
+          <div
+            className="h-4 w-8 rounded-full border border-black/15"
+            style={{ backgroundColor: "var(--accent)" }}
+            aria-label="アクセントカラープレビュー"
+          />
         </div>
       </div>
     </div>

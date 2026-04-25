@@ -1,6 +1,8 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
+import { signIn } from "next-auth/react";
 import type { MembershipRole } from "@prisma/client";
 import {
   createHouseholdInviteLink,
@@ -25,7 +27,7 @@ type GisOauth2 = {
   initTokenClient: (opts: {
     client_id: string;
     scope: string;
-    callback: (resp: { access_token?: string }) => void;
+    callback: (resp: { access_token?: string; expires_in?: number }) => void;
     error_callback?: (resp: { type?: string }) => void;
   }) => { requestAccessToken: (opts?: { prompt?: string }) => void };
   initCodeClient: (opts: {
@@ -165,10 +167,21 @@ export function SettingsUserHeader({
   } | null>(null);
   const [googlePreviewUrl, setGooglePreviewUrl] = useState<string | null>(null);
   const [googlePicking, setGooglePicking] = useState(false);
+  const [googlePickerUi, setGooglePickerUi] = useState<{ pickerUri: string } | null>(null);
+  const [googlePickerError, setGooglePickerError] = useState<string | null>(null);
+  const [cropOpen, setCropOpen] = useState(false);
+  const [cropZoom, setCropZoom] = useState(1.2);
+  const [cropOffset, setCropOffset] = useState({ x: 0, y: 0 });
+  const [cropBusy, setCropBusy] = useState(false);
+  const [cropError, setCropError] = useState<string | null>(null);
+  const [portalReady, setPortalReady] = useState(false);
+  const cropPointersRef = useRef<Map<number, { x: number; y: number }>>(new Map());
+  const cropPinchRef = useRef<{ startDist: number; startZoom: number } | null>(null);
   const uploadFormRef = useRef<HTMLFormElement | null>(null);
   const urlFormRef = useRef<HTMLFormElement | null>(null);
   const googleFormRef = useRef<HTMLFormElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const cropDragRef = useRef<{ sx: number; sy: number; ox: number; oy: number } | null>(null);
   const [inviteRole, setInviteRole] = useState<MembershipRole>("editor");
   const [inviteUrl, setInviteUrl] = useState<string | null>(null);
   const [inviteBusy, setInviteBusy] = useState(false);
@@ -190,6 +203,8 @@ export function SettingsUserHeader({
 
   useEffect(() => {
     if (!googlePreviewUrl) return;
+    // blob: の場合のみ revoke（https: など通常URLでは不要）
+    if (!googlePreviewUrl.startsWith("blob:")) return;
     return () => URL.revokeObjectURL(googlePreviewUrl);
   }, [googlePreviewUrl]);
 
@@ -199,6 +214,129 @@ export function SettingsUserHeader({
     if ((imageDraftUrl ?? "").trim()) return (imageDraftUrl ?? "").trim();
     return user.image;
   }, [googlePreviewUrl, imageDraftObjectUrl, imageDraftUrl, user.image]);
+
+  const loadImageAsSafeUrl = async (src: string): Promise<{ url: string; revoke?: () => void }> => {
+    // 可能ならそのまま使う。canvas に描くときにCORSで失敗したら image-proxy にフォールバックする。
+    if (!src) throw new Error("画像がありません。");
+    return { url: src };
+  };
+
+  const fetchViaProxyAsBlobUrl = async (src: string) => {
+    const res = await fetch(`/api/image-proxy?url=${encodeURIComponent(src)}`, { cache: "no-store" });
+    if (!res.ok) throw new Error("画像の取得に失敗しました（プロキシ）。");
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    return { url, revoke: () => URL.revokeObjectURL(url) };
+  };
+
+  const cropApply = async () => {
+    if (!imagePreviewSrc) return;
+    setCropBusy(true);
+    setCropError(null);
+    let revoke: (() => void) | undefined;
+    try {
+      let safe = await loadImageAsSafeUrl(imagePreviewSrc);
+      let img = new Image();
+      img.crossOrigin = "anonymous";
+      img.decoding = "async";
+      img.src = safe.url;
+
+      await new Promise<void>((resolve, reject) => {
+        img.onload = () => resolve();
+        img.onerror = () => reject(new Error("画像の読み込みに失敗しました。"));
+      });
+
+      const SIZE = 512;
+      const canvas = document.createElement("canvas");
+      canvas.width = SIZE;
+      canvas.height = SIZE;
+      const ctx = canvas.getContext("2d");
+      if (!ctx) throw new Error("Canvasの初期化に失敗しました。");
+
+      const container = 240; // UI上のプレビュー枠（px想定）
+      const scale = Math.max(1, cropZoom);
+      // コンテナ中央を基準に offset だけ移動しているとみなす
+      const dx = cropOffset.x;
+      const dy = cropOffset.y;
+
+      // 画像を container に cover で当てたときの基準スケール
+      const baseCover = Math.max(container / img.naturalWidth, container / img.naturalHeight);
+      const drawScale = baseCover * scale;
+      const drawnW = img.naturalWidth * drawScale;
+      const drawnH = img.naturalHeight * drawScale;
+      const drawnX = (container - drawnW) / 2 + dx;
+      const drawnY = (container - drawnH) / 2 + dy;
+
+      // container(240) 内の正方形を SIZE に写す
+      ctx.fillStyle = "#ffffff";
+      ctx.fillRect(0, 0, SIZE, SIZE);
+      ctx.save();
+      ctx.scale(SIZE / container, SIZE / container);
+      ctx.drawImage(img, drawnX, drawnY, drawnW, drawnH);
+      ctx.restore();
+
+      // CORSで canvas が汚染されている場合、toBlob で例外/失敗し得るのでフォールバック
+      const blob = await new Promise<Blob>((resolve, reject) => {
+        canvas.toBlob(
+          (b) => {
+            if (!b) reject(new Error("画像の書き出しに失敗しました。"));
+            else resolve(b);
+          },
+          "image/jpeg",
+          0.9,
+        );
+      }).catch(async () => {
+        // proxy 経由で再試行
+        const proxied = await fetchViaProxyAsBlobUrl(imagePreviewSrc);
+        revoke = proxied.revoke;
+        img = new Image();
+        img.crossOrigin = "anonymous";
+        img.decoding = "async";
+        img.src = proxied.url;
+        await new Promise<void>((resolve, reject) => {
+          img.onload = () => resolve();
+          img.onerror = () => reject(new Error("画像の読み込みに失敗しました（プロキシ）。"));
+        });
+        ctx.fillStyle = "#ffffff";
+        ctx.fillRect(0, 0, SIZE, SIZE);
+        ctx.save();
+        ctx.scale(SIZE / container, SIZE / container);
+        const baseCover2 = Math.max(container / img.naturalWidth, container / img.naturalHeight);
+        const drawScale2 = baseCover2 * scale;
+        const drawnW2 = img.naturalWidth * drawScale2;
+        const drawnH2 = img.naturalHeight * drawScale2;
+        const drawnX2 = (container - drawnW2) / 2 + dx;
+        const drawnY2 = (container - drawnH2) / 2 + dy;
+        ctx.drawImage(img, drawnX2, drawnY2, drawnW2, drawnH2);
+        ctx.restore();
+        const blob2 = await new Promise<Blob>((resolve, reject) => {
+          canvas.toBlob(
+            (b) => {
+              if (!b) reject(new Error("画像の書き出しに失敗しました（プロキシ）。"));
+              else resolve(b);
+            },
+            "image/jpeg",
+            0.9,
+          );
+        });
+        return blob2;
+      });
+
+      if (blob.size > 5 * 1024 * 1024) throw new Error("画像サイズが大きすぎます（最大5MB）。");
+      const f = new File([blob], `cropped_${Date.now()}.jpg`, { type: "image/jpeg" });
+      setImageDraftFile(f);
+      setImageDraftUrl(null);
+      setGooglePicked(null);
+      setGooglePreviewUrl(null);
+      if (fileInputRef.current) fileInputRef.current.value = "";
+      setCropOpen(false);
+    } catch (e) {
+      setCropError(e instanceof Error ? e.message : "画像の調整に失敗しました。");
+    } finally {
+      if (revoke) revoke();
+      setCropBusy(false);
+    }
+  };
 
   async function ensureGisLoaded() {
     if (typeof window === "undefined") return;
@@ -219,6 +357,64 @@ export function SettingsUserHeader({
       document.head.appendChild(s);
     });
   }
+
+  const TOKEN_KEY = "gphotos_access_token";
+  const TOKEN_EXPIRES_AT_KEY = "gphotos_access_expires_at_ms";
+  const PENDING_SESSION_ID_KEY = "gphotos_pending_session_id";
+  const PENDING_PICKER_URI_KEY = "gphotos_pending_picker_uri";
+
+  const getCachedAccessToken = () => {
+    try {
+      const token = sessionStorage.getItem(TOKEN_KEY) || "";
+      const expiresAt = Number(sessionStorage.getItem(TOKEN_EXPIRES_AT_KEY) || "0");
+      if (!token) return null;
+      // 数十秒の余裕を見て切る
+      if (!Number.isFinite(expiresAt) || Date.now() > expiresAt - 30_000) return null;
+      return token;
+    } catch {
+      return null;
+    }
+  };
+
+  const cacheAccessToken = (token: string, expiresInSec?: number | null) => {
+    try {
+      sessionStorage.setItem(TOKEN_KEY, token);
+      // GIS の expires_in が無い場合でも、短めに見積もってキャッシュする
+      const ttlMs = typeof expiresInSec === "number" && Number.isFinite(expiresInSec) && expiresInSec > 0 ? expiresInSec * 1000 : 30 * 60 * 1000;
+      sessionStorage.setItem(TOKEN_EXPIRES_AT_KEY, String(Date.now() + ttlMs));
+    } catch {
+      // noop
+    }
+  };
+
+  const getPendingSession = () => {
+    try {
+      const id = (sessionStorage.getItem(PENDING_SESSION_ID_KEY) || "").trim();
+      const pickerUri = (sessionStorage.getItem(PENDING_PICKER_URI_KEY) || "").trim();
+      if (!id || !pickerUri) return null;
+      return { id, pickerUri };
+    } catch {
+      return null;
+    }
+  };
+
+  const setPendingSession = (id: string, pickerUri: string) => {
+    try {
+      sessionStorage.setItem(PENDING_SESSION_ID_KEY, id);
+      sessionStorage.setItem(PENDING_PICKER_URI_KEY, pickerUri);
+    } catch {
+      // noop
+    }
+  };
+
+  const clearPendingSession = () => {
+    try {
+      sessionStorage.removeItem(PENDING_SESSION_ID_KEY);
+      sessionStorage.removeItem(PENDING_PICKER_URI_KEY);
+    } catch {
+      // noop
+    }
+  };
 
   function requestGoogleAccessToken(): Promise<string> {
     // 重要: クリック直後の同期コンテキストで popup を開けるように、
@@ -244,7 +440,10 @@ export function SettingsUserHeader({
         scope: "https://www.googleapis.com/auth/photospicker.mediaitems.readonly",
         callback: (resp) => {
           if (!resp?.access_token) reject(new Error("Googleの認証に失敗しました。"));
-          else resolve(resp.access_token as string);
+          else {
+            cacheAccessToken(resp.access_token as string, typeof resp.expires_in === "number" ? resp.expires_in : null);
+            resolve(resp.access_token as string);
+          }
         },
         error_callback: (e) => {
           const t = (e?.type ?? "").trim();
@@ -294,6 +493,7 @@ export function SettingsUserHeader({
     ensureGisLoaded().catch(() => {
       // 読み込み失敗時は、実行時に requestGoogleAccessToken 側でエラー表示する
     });
+    setPortalReady(true);
 
     // redirect UX の復帰処理: /settings?code=...&state=...
     const url = new URL(window.location.href);
@@ -315,42 +515,196 @@ export function SettingsUserHeader({
         const fd = new FormData();
         fd.set("code", code);
         fd.set("redirectUri", redirectUri);
-        const { accessToken } = (await exchangeGoogleAuthCodeForPhotosAccessToken(fd)) as { accessToken: string };
+        const { accessToken, expiresIn } = (await exchangeGoogleAuthCodeForPhotosAccessToken(fd)) as {
+          accessToken: string;
+          expiresIn: number | null;
+        };
+        cacheAccessToken(accessToken, expiresIn);
         // tokenClient が使えない環境向けに、ここでPickerを起動できるようにしておく
+        setGooglePicking(true);
         setGooglePicked(null);
         setGooglePreviewUrl(null);
-        // 以降は既存フローと同じセッション作成へ
-        const createRes = await fetch("https://photospicker.googleapis.com/v1/sessions", {
-          method: "POST",
-          headers: {
-            Authorization: `Bearer ${accessToken}`,
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({ pickingConfig: { maxMediaItems: 1 } }),
-        });
-        if (!createRes.ok) throw new Error("Google Photos Picker の開始に失敗しました。");
-        const session = (await createRes.json()) as { id: string; pickerUri: string };
-        const rawPickerUri = String(session.pickerUri ?? "").trim();
-        const pickerUri = rawPickerUri.replace(/\/$/, "") + "/autoclose";
-        window.location.href = pickerUri;
+        await runGooglePhotosPickerInNewTab(accessToken);
       } catch (e) {
         alert(e instanceof Error ? e.message : "Google認証に失敗しました。");
+      } finally {
+        setGooglePickerUi(null);
+        setGooglePicking(false);
       }
     })();
   }, []);
 
+  useEffect(() => {
+    if (!cropOpen) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setCropOpen(false);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [cropOpen]);
+
+  useEffect(() => {
+    // 「このタブで開く」から戻ってきた場合、保存しておいたセッションから再開する。
+    // ブラウザの戻るは BFCache で復元されることがあり、その場合 useEffect([]) が再実行されないため、
+    // pageshow/visibilitychange/focus でも再開を試みる。
+    let running = false;
+
+    const resumePending = async () => {
+      if (running) return;
+      const pending = getPendingSession();
+      if (!pending) return;
+      const token = getCachedAccessToken();
+      if (!token) return;
+      running = true;
+      setGooglePicking(true);
+      setGooglePickerUi({ pickerUri: pending.pickerUri });
+      try {
+        await pollAndFetchPickedItem(token, { id: pending.id });
+        clearPendingSession();
+      } catch (e) {
+        // 失敗時も pending は残す（ユーザーが再試行できるようにする）
+        alert(e instanceof Error ? e.message : "Googleフォトの取得に失敗しました。");
+      } finally {
+        setGooglePickerUi(null);
+        setGooglePicking(false);
+        running = false;
+      }
+    };
+
+    // 初回
+    void resumePending();
+
+    const onPageShow = () => void resumePending();
+    const onFocus = () => void resumePending();
+    const onVis = () => {
+      if (document.visibilityState === "visible") void resumePending();
+    };
+    window.addEventListener("pageshow", onPageShow);
+    window.addEventListener("focus", onFocus);
+    document.addEventListener("visibilitychange", onVis);
+    return () => {
+      window.removeEventListener("pageshow", onPageShow);
+      window.removeEventListener("focus", onFocus);
+      document.removeEventListener("visibilitychange", onVis);
+    };
+  }, []);
+
+  const formatHttpError = async (res: Response) => {
+    let body = "";
+    try {
+      body = (await res.text()).trim();
+    } catch {
+      body = "";
+    }
+    const snippet = body.length > 600 ? body.slice(0, 600) + "…" : body;
+    return `status=${res.status} ${res.statusText}${snippet ? ` body=${snippet}` : ""}`;
+  };
+
+  const parseDurationMs = (d?: string) => {
+    if (!d) return null;
+    const m = /^(\d+(?:\.\d+)?)s$/.exec(d);
+    if (!m) return null;
+    return Math.max(0, Math.round(Number(m[1]) * 1000));
+  };
+
+  async function createGooglePhotosPickerSession(accessToken: string) {
+    // 以後はサーバ（NextAuth の Google トークン）経由でセッション作成する
+    const createRes = await fetch("/api/google-photos/picker/session", { method: "POST" });
+    if (!createRes.ok) {
+      let message = `Google Photos Picker の開始に失敗しました（${await formatHttpError(createRes)}）`;
+      try {
+        const j = (await createRes.json()) as { message?: string };
+        if (j?.message) message = j.message;
+      } catch {
+        // noop
+      }
+      throw new Error(message);
+    }
+    const session = (await createRes.json()) as { sessionId: string; pickerUri: string; pollingConfig?: { pollInterval?: string; timeoutIn?: string } };
+    const rawPickerUri = String(session.pickerUri ?? "").trim();
+    if (!rawPickerUri.startsWith("http")) {
+      throw new Error(`Google Photos Picker のURLが不正です: ${rawPickerUri || "（空）"}`);
+    }
+    const pickerUri = rawPickerUri.replace(/\/$/, "");
+    return { id: session.sessionId, pickerUri, pollingConfig: session.pollingConfig };
+  }
+
+  async function pollAndFetchPickedItem(accessToken: string, session: { id: string; pollingConfig?: { pollInterval?: string; timeoutIn?: string } }) {
+    const startedAt = Date.now();
+    let pollIntervalMs = parseDurationMs(session.pollingConfig?.pollInterval) ?? 1200;
+    let timeoutMs = parseDurationMs(session.pollingConfig?.timeoutIn) ?? 90_000;
+
+    while (true) {
+      const pollRes = await fetch(`/api/google-photos/picker/session?sessionId=${encodeURIComponent(session.id)}`);
+      if (!pollRes.ok) throw new Error(`Google Photos Picker の状態取得に失敗しました（${await formatHttpError(pollRes)}）`);
+      const polled = (await pollRes.json()) as { mediaItemsSet?: boolean; pollingConfig?: { pollInterval?: string; timeoutIn?: string } };
+      const nextInterval = parseDurationMs(polled.pollingConfig?.pollInterval);
+      const nextTimeout = parseDurationMs(polled.pollingConfig?.timeoutIn);
+      if (nextInterval != null) pollIntervalMs = nextInterval;
+      if (nextTimeout != null) timeoutMs = nextTimeout;
+
+      if (polled.mediaItemsSet) break;
+      if (Date.now() - startedAt > timeoutMs) throw new Error("Google Photos Picker がタイムアウトしました。");
+      await new Promise((r) => setTimeout(r, pollIntervalMs));
+    }
+
+    const listRes = await fetch(`/api/google-photos/picker/media?sessionId=${encodeURIComponent(session.id)}`);
+    if (!listRes.ok) throw new Error(`選択した画像の取得に失敗しました（${await formatHttpError(listRes)}）`);
+    const list = (await listRes.json()) as { baseUrl: string; mimeType: string; fileName: string };
+    const baseUrl = list.baseUrl ?? "";
+    const mimeType = list.mimeType ?? "image/jpeg";
+    const fileName = list.fileName ?? "google-photos.jpg";
+    if (!baseUrl) throw new Error("選択した画像のURLが取得できませんでした。");
+
+    // 画像は選択直後にプレビューできるよう baseUrl を直接使う（適用時のダウンロードはサーバ側で行う）
+    // baseUrl はそのままだと巨大な場合があるため、軽いサイズを指定
+    // Pickerが返すURLはそのままだとブラウザ直アクセスで見れない場合があるので、
+    // NextAuthのトークンを使うサーバ経由でプレビューする
+    setGooglePreviewUrl(`/api/google-photos/image?baseUrl=${encodeURIComponent(baseUrl)}&w=512&h=512`);
+    setGooglePicked({ accessToken: "", baseUrl, fileName, mimeType });
+    setImageDraftFile(null);
+    setImageDraftUrl(null);
+    if (fileInputRef.current) fileInputRef.current.value = "";
+  }
+
+  async function runGooglePhotosPickerInNewTab(accessToken: string) {
+    setGooglePickerError(null);
+    const session = await createGooglePhotosPickerSession(accessToken);
+    const pickerUri = session.pickerUri.replace(/\/$/, "") + "/autoclose";
+    setGooglePickerUi({ pickerUri });
+    clearPendingSession();
+    try {
+      window.open(pickerUri, "_blank");
+    } catch {
+      // popup ブロック環境でも、モーダル内のリンクから開ける
+    }
+    await pollAndFetchPickedItem(accessToken, session);
+  }
+
+  async function runGooglePhotosPickerInThisTab(accessToken: string) {
+    setGooglePickerError(null);
+    const session = await createGooglePhotosPickerSession(accessToken);
+    const pickerUri = session.pickerUri.replace(/\/$/, "");
+    // このタブ遷移の場合はアプリ側の JS が止まるので、復帰後に再開できるよう保存してから遷移
+    setPendingSession(session.id, pickerUri);
+    setGooglePickerUi({ pickerUri });
+    window.location.href = pickerUri;
+    // 遷移するのでここには戻らない想定
+    throw new Error("navigating");
+  }
+
   async function pickFromGooglePhotos() {
     if (googlePicking) return;
     setGooglePicking(true);
+    setGooglePickerError(null);
     const forceRedirect = sessionStorage.getItem("gphotos_force_redirect") === "1";
-    // async 後の window.open はポップアップブロックされやすいので、
-    // ユーザー操作直後にウィンドウだけ先に開いておく。
-    // NOTE: `noopener` を付けるとブラウザによっては window 参照が返らず、
-    // その後の `popup.location.href = ...` ができないことがある。
-    // セキュリティ上は遷移後に `opener` を切る。
-    const popup = forceRedirect ? null : window.open("about:blank", "_blank");
     try {
       let accessToken: string;
+      const cached = getCachedAccessToken();
+      if (cached) {
+        await runGooglePhotosPickerInNewTab(cached);
+        return;
+      }
       if (forceRedirect) {
         await requestGoogleAccessTokenViaRedirect();
       }
@@ -361,152 +715,129 @@ export function SettingsUserHeader({
         // ポップアップが開けない/閉じられた場合は redirect UX に切替（以後は固定）
         if (msg.includes("gis_error:popup_failed_to_open") || msg.includes("gis_error:popup_closed") || msg.includes("gis_error:")) {
           sessionStorage.setItem("gphotos_force_redirect", "1");
-          try {
-            popup?.close();
-          } catch {
-            // noop
-          }
           await requestGoogleAccessTokenViaRedirect();
         }
         throw e;
       }
-      const createRes = await fetch("https://photospicker.googleapis.com/v1/sessions", {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${accessToken}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          pickingConfig: {
-            maxMediaItems: 1,
-          },
-        }),
-      });
-      if (!createRes.ok) throw new Error("Google Photos Picker の開始に失敗しました。");
-      const session = (await createRes.json()) as {
-        id: string;
-        pickerUri: string;
-        pollingConfig?: { pollInterval?: string; timeoutIn?: string };
-      };
-      const rawPickerUri = String(session.pickerUri ?? "").trim();
-      if (!rawPickerUri.startsWith("http")) {
-        throw new Error(`Google Photos Picker のURLが不正です: ${rawPickerUri || "（空）"}`);
-      }
-      const pickerUri = rawPickerUri.replace(/\/$/, "") + "/autoclose";
-      if (!popup) {
-        // フォールバック（同一タブ）。ユーザー操作から時間が経っているため `window.open` は通りにくい。
-        window.location.href = pickerUri;
-        return;
-      }
-      // 遷移がブロックされる環境でもユーザーが進めるよう、タブ内にリンクを残す。
-      try {
-        popup.document.open();
-        popup.document.write(`<!doctype html>
-<meta charset="utf-8" />
-<title>Google Photos Picker を開いています…</title>
-<meta name="viewport" content="width=device-width, initial-scale=1" />
-<body style="font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; padding: 24px;">
-  <h1 style="font-size: 16px; margin: 0 0 12px;">Google Photos Picker を開いています…</h1>
-  <p style="font-size: 13px; color: #444; margin: 0 0 16px;">
-    自動で遷移しない場合は、下のリンクをクリックしてください。
-  </p>
-  <p style="margin: 0 0 16px;">
-    <a href="${pickerUri}" target="_self" rel="noreferrer" style="font-size: 14px;">Google Photos Picker を開く</a>
-  </p>
-  <p style="font-size: 12px; color: #666; margin: 0;">
-    URL: <span style="font-family: ui-monospace, SFMono-Regular, Menlo, monospace;">${pickerUri}</span>
-  </p>
-</body>`);
-        popup.document.close();
-      } catch {
-        // noop (クロスオリジンなどで document が触れない環境向け)
-      }
-      try {
-        popup.location.replace(pickerUri);
-      } catch {
-        popup.location.href = pickerUri;
-      }
-      try {
-        popup.opener = null;
-      } catch {
-        // noop
-      }
-      try {
-        popup.focus();
-      } catch {
-        // noop
-      }
-
-      const startedAt = Date.now();
-      let pollIntervalMs = 1200;
-      let timeoutMs = 90_000;
-
-      const parseDurationMs = (d?: string) => {
-        if (!d) return null;
-        const m = /^(\d+(?:\.\d+)?)s$/.exec(d);
-        if (!m) return null;
-        return Math.max(0, Math.round(Number(m[1]) * 1000));
-      };
-
-      while (true) {
-        const pollRes = await fetch(`https://photospicker.googleapis.com/v1/sessions/${encodeURIComponent(session.id)}`, {
-          headers: { Authorization: `Bearer ${accessToken}` },
-        });
-        if (!pollRes.ok) throw new Error("Google Photos Picker の状態取得に失敗しました。");
-        const polled = (await pollRes.json()) as {
-          id: string;
-          mediaItemsSet?: boolean;
-          pollingConfig?: { pollInterval?: string; timeoutIn?: string };
-        };
-        const nextInterval = parseDurationMs(polled.pollingConfig?.pollInterval);
-        const nextTimeout = parseDurationMs(polled.pollingConfig?.timeoutIn);
-        if (nextInterval != null) pollIntervalMs = nextInterval;
-        if (nextTimeout != null) timeoutMs = nextTimeout;
-
-        if (polled.mediaItemsSet) break;
-        if (Date.now() - startedAt > timeoutMs) throw new Error("Google Photos Picker がタイムアウトしました。");
-        await new Promise((r) => setTimeout(r, pollIntervalMs));
-      }
-
-      const listRes = await fetch(`https://photospicker.googleapis.com/v1/mediaItems?sessionId=${encodeURIComponent(session.id)}`, {
-        headers: { Authorization: `Bearer ${accessToken}` },
-      });
-      if (!listRes.ok) throw new Error("選択した画像の取得に失敗しました。");
-      const list = (await listRes.json()) as {
-        mediaItems?: { id: string; mediaFile?: { baseUrl?: string; mimeType?: string; filename?: string } }[];
-      };
-      const first = list.mediaItems?.[0]?.mediaFile;
-      const baseUrl = first?.baseUrl ?? "";
-      const mimeType = first?.mimeType ?? "image/jpeg";
-      const fileName = first?.filename ?? "google-photos.jpg";
-      if (!baseUrl) throw new Error("選択した画像のURLが取得できませんでした。");
-
-      // プレビュー用に縮小画像をクライアントで取得（Authorization 必須のため）
-      const previewRes = await fetch(`${baseUrl}=w256-h256-c`, {
-        headers: { Authorization: `Bearer ${accessToken}` },
-      });
-      if (previewRes.ok) {
-        const blob = await previewRes.blob();
-        setGooglePreviewUrl(URL.createObjectURL(blob));
-      } else {
-        setGooglePreviewUrl(null);
-      }
-
-      setGooglePicked({ accessToken, baseUrl, fileName, mimeType });
-      setImageDraftFile(null);
-      setImageDraftUrl(null);
-      if (fileInputRef.current) fileInputRef.current.value = "";
+      await runGooglePhotosPickerInNewTab(accessToken);
+    } catch (e) {
+      setGooglePickerError(e instanceof Error ? e.message : "Googleフォトの起動に失敗しました。");
+      throw e;
     } finally {
-      if (popup && popup.location.href === "about:blank") {
-        // 失敗した場合などに空タブが残らないようにする
-        popup.close();
-      }
+      setGooglePickerUi(null);
       setGooglePicking(false);
     }
   }
 
   return (
     <>
+      {googlePickerUi ? (
+        <div className="fixed inset-0 z-[110] flex items-end justify-center sm:items-center">
+          <button
+            type="button"
+            aria-label="閉じる"
+            className="absolute inset-0 bg-black/50"
+            onClick={() => {
+              setGooglePickerUi(null);
+              setGooglePicking(false);
+            }}
+          />
+          <div className="relative w-full max-w-lg rounded-t-3xl border border-black/10 bg-white p-5 shadow-lg sm:rounded-3xl">
+            <div className="flex items-start justify-between gap-3">
+              <div className="min-w-0">
+                <div className="text-base font-semibold text-neutral-950">Googleフォトで画像を選択</div>
+                <div className="mt-1 text-sm text-black/60">
+                  Google 側はセキュリティ上、ページをこの画面内に埋め込めないため、別タブで開きます。
+                </div>
+              </div>
+              <button
+                type="button"
+                className="inline-flex size-9 items-center justify-center rounded-full text-black/60 hover:bg-black/[0.06] hover:text-black"
+                aria-label="閉じる"
+                title="閉じる"
+                onClick={() => {
+                  setGooglePickerUi(null);
+                  setGooglePicking(false);
+                }}
+              >
+                <IconX className="size-4" />
+              </button>
+            </div>
+
+            <div className="mt-4 space-y-3">
+              {googlePickerError ? (
+                <div className="rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-800">
+                  <div className="font-medium">Google連携の再認可が必要です</div>
+                  <div className="mt-1 text-xs text-red-700">{googlePickerError}</div>
+                  <div className="mt-3 flex flex-col gap-2 sm:flex-row">
+                    <button
+                      type="button"
+                      className="w-full rounded-xl bg-red-600 px-4 py-2.5 text-sm font-medium text-white hover:bg-red-700"
+                      onClick={() => {
+                        // refresh_token を得るため、offline + consent を明示して Google 再認可へ
+                        void signIn(
+                          "google",
+                          { callbackUrl: "/settings" },
+                          { prompt: "consent", access_type: "offline", include_granted_scopes: "true" },
+                        );
+                      }}
+                    >
+                      Googleで再ログイン（権限更新）
+                    </button>
+                    <button
+                      type="button"
+                      className="w-full rounded-xl border border-red-200 bg-white px-4 py-2.5 text-sm font-medium text-red-800 hover:bg-red-50"
+                      onClick={() => setGooglePickerError(null)}
+                    >
+                      いったん閉じる
+                    </button>
+                  </div>
+                </div>
+              ) : null}
+
+              <button
+                type="button"
+                className="w-full rounded-xl bg-black px-4 py-2.5 text-sm font-medium text-white hover:bg-black/90"
+                onClick={() => window.open(googlePickerUi.pickerUri, "_blank")}
+              >
+                別タブで開く（推奨）
+              </button>
+              <button
+                type="button"
+                className="w-full rounded-xl border border-black/15 bg-white px-4 py-2.5 text-sm font-medium text-neutral-900 hover:bg-black/[0.03]"
+                onClick={async () => {
+                  try {
+                    const token = getCachedAccessToken() ?? (await requestGoogleAccessToken());
+                    await runGooglePhotosPickerInThisTab(token);
+                  } catch (e) {
+                    setGooglePickerError(e instanceof Error ? e.message : "Googleフォトの起動に失敗しました。");
+                  }
+                }}
+              >
+                このタブで開く（戻ってきたら自動反映）
+              </button>
+              <div className="rounded-xl border border-black/10 bg-black/[0.02] p-3 text-xs text-black/60">
+                別タブで選択して「完了」すると、この画面が自動で更新されます（このモーダルは開いたままにしてください）。
+              </div>
+              <div className="rounded-xl border border-black/10 bg-white p-3">
+                <div className="text-xs font-medium text-black/60">開くURL</div>
+                <div className="mt-1 break-all font-mono text-[11px] text-black/70">{googlePickerUi.pickerUri}</div>
+              </div>
+              <button
+                type="button"
+                className="w-full rounded-xl border border-black/15 bg-white px-4 py-2.5 text-sm font-medium text-neutral-900 hover:bg-black/[0.03]"
+                onClick={() => {
+                  setGooglePickerUi(null);
+                  setGooglePicking(false);
+                }}
+              >
+                キャンセル
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
       <button
         type="button"
         onClick={() => {
@@ -705,11 +1036,24 @@ export function SettingsUserHeader({
                   <div className="rounded-xl border border-black/10 bg-white p-3">
                     <div className="text-xs font-medium text-black/60">選択中の画像</div>
                     <div className="mt-2 flex items-start gap-3">
-                      <img
-                        src={imagePreviewSrc ?? ""}
-                        alt=""
-                        className="size-24 rounded-2xl border border-black/10 object-cover bg-black/[0.02]"
-                      />
+                      <button
+                        type="button"
+                        className="rounded-2xl focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-black/25"
+                        title="クリックしてサイズ・位置を調整"
+                        aria-label="画像を調整"
+                        onClick={() => {
+                          setCropError(null);
+                          setCropZoom(1.2);
+                          setCropOffset({ x: 0, y: 0 });
+                          setCropOpen(true);
+                        }}
+                      >
+                        <img
+                          src={imagePreviewSrc ?? ""}
+                          alt=""
+                          className="size-24 rounded-2xl border border-black/10 object-cover bg-black/[0.02]"
+                        />
+                      </button>
                       <div className="min-w-0 flex-1">
                         <div className="text-sm font-medium text-neutral-900">
                           {googlePicked
@@ -1076,6 +1420,154 @@ export function SettingsUserHeader({
           </div>
         </div>
       ) : null}
+
+      {cropOpen && portalReady
+        ? createPortal(
+            <div className="fixed inset-0 z-[120] flex items-end justify-center p-3 sm:items-center sm:p-6">
+              <div
+                className="fixed inset-0 bg-black/50"
+                role="button"
+                aria-label="閉じる"
+                tabIndex={-1}
+                onClick={() => setCropOpen(false)}
+              />
+              <div className="relative w-full max-w-lg overflow-hidden rounded-3xl border border-black/10 bg-white shadow-lg">
+                <div className="flex items-start justify-between gap-3 border-b border-black/10 px-5 py-4">
+                  <div className="min-w-0">
+                    <div className="text-base font-semibold text-neutral-950">画像を調整</div>
+                    <div className="mt-1 text-sm text-black/60">ドラッグで位置、スライダーで拡大縮小できます。</div>
+                  </div>
+                  <button
+                    type="button"
+                    className="inline-flex size-9 items-center justify-center rounded-full text-black/60 hover:bg-black/[0.06] hover:text-black"
+                    aria-label="閉じる"
+                    title="閉じる"
+                    onClick={() => setCropOpen(false)}
+                  >
+                    <IconX className="size-4" />
+                  </button>
+                </div>
+                <div className="app-scrollbar max-h-[80dvh] space-y-3 overflow-y-auto px-5 py-5">
+            <div className="flex items-start justify-between gap-3">
+              <div className="min-w-0">
+                <div className="text-sm font-medium text-neutral-900">プレビュー</div>
+                <div className="mt-0.5 text-xs text-black/50">円の中が最終的なアイコンになります。</div>
+              </div>
+            </div>
+
+            {cropError ? (
+              <div className="rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-800">{cropError}</div>
+            ) : null}
+
+            <div className="flex items-center justify-center">
+              <div
+                className="relative size-[260px] overflow-hidden rounded-full border border-black/10 bg-black/[0.02]"
+                onPointerDown={(e) => {
+                  (e.currentTarget as HTMLDivElement).setPointerCapture(e.pointerId);
+                  cropPointersRef.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
+                  if (cropPointersRef.current.size === 2) {
+                    const pts = Array.from(cropPointersRef.current.values());
+                    const dx = pts[0]!.x - pts[1]!.x;
+                    const dy = pts[0]!.y - pts[1]!.y;
+                    cropPinchRef.current = { startDist: Math.hypot(dx, dy), startZoom: cropZoom };
+                  } else {
+                  cropDragRef.current = { sx: e.clientX, sy: e.clientY, ox: cropOffset.x, oy: cropOffset.y };
+                  }
+                }}
+                onPointerMove={(e) => {
+                  if (cropPointersRef.current.has(e.pointerId)) {
+                    cropPointersRef.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
+                  }
+                  // 2点ならピンチズーム（タッチ操作）
+                  if (cropPointersRef.current.size === 2 && cropPinchRef.current) {
+                    const pts = Array.from(cropPointersRef.current.values());
+                    const dx = pts[0]!.x - pts[1]!.x;
+                    const dy = pts[0]!.y - pts[1]!.y;
+                    const dist = Math.hypot(dx, dy);
+                    const ratio = cropPinchRef.current.startDist > 0 ? dist / cropPinchRef.current.startDist : 1;
+                    const next = Math.max(1, Math.min(3, cropPinchRef.current.startZoom * ratio));
+                    setCropZoom(next);
+                    return;
+                  }
+                  const d = cropDragRef.current;
+                  if (!d) return;
+                  setCropOffset({ x: d.ox + (e.clientX - d.sx), y: d.oy + (e.clientY - d.sy) });
+                }}
+                onPointerUp={() => {
+                  cropDragRef.current = null;
+                  cropPinchRef.current = null;
+                  cropPointersRef.current.clear();
+                }}
+                onPointerCancel={() => {
+                  cropDragRef.current = null;
+                  cropPinchRef.current = null;
+                  cropPointersRef.current.clear();
+                }}
+                onWheel={(e) => {
+                  // トラックパッド/マウスホイールでズーム（画面操作）
+                  e.preventDefault();
+                  const delta = e.deltaY;
+                  // 速すぎないように緩める
+                  const factor = Math.exp(-delta * 0.0015);
+                  setCropZoom((z) => Math.max(1, Math.min(3, z * factor)));
+                }}
+                style={{ touchAction: "none" }}
+              >
+                <img
+                  src={imagePreviewSrc ?? ""}
+                  alt=""
+                  className="h-full w-full select-none object-cover"
+                  draggable={false}
+                  style={{
+                    transform: `translate(${cropOffset.x}px, ${cropOffset.y}px) scale(${cropZoom})`,
+                    transformOrigin: "center",
+                  }}
+                />
+              </div>
+            </div>
+
+            <div className="space-y-1">
+              <div className="flex items-center justify-between">
+                <div className="text-xs font-medium text-black/60">拡大</div>
+                <div className="text-xs tabular-nums text-black/45">{Math.round(cropZoom * 100)}%</div>
+              </div>
+              <input
+                type="range"
+                min={1}
+                max={3}
+                step={0.01}
+                value={cropZoom}
+                onChange={(e) => setCropZoom(Number(e.target.value))}
+                className="w-full"
+              />
+            </div>
+
+            <div className="flex flex-wrap gap-2 pt-1">
+              <button
+                type="button"
+                className="rounded-xl border border-black/15 bg-white px-4 py-2 text-sm font-medium text-neutral-900 hover:bg-black/[0.03]"
+                onClick={() => {
+                  setCropZoom(1.2);
+                  setCropOffset({ x: 0, y: 0 });
+                }}
+              >
+                リセット
+              </button>
+              <button
+                type="button"
+                disabled={cropBusy}
+                className="ml-auto rounded-xl bg-black px-4 py-2 text-sm font-medium text-white hover:bg-black/90 disabled:opacity-40"
+                onClick={() => void cropApply()}
+              >
+                この切り抜きで適用
+              </button>
+            </div>
+                </div>
+              </div>
+            </div>,
+            document.body,
+          )
+        : null}
     </>
   );
 }

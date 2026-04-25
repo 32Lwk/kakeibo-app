@@ -6,6 +6,7 @@ import { redirect } from "next/navigation";
 import { prisma } from "@/lib/db";
 import { requireAuthedContext, requireRole } from "@/lib/authz";
 import type { MembershipRole } from "@prisma/client";
+import { getGoogleAccessTokenForUser } from "@/lib/googleOAuth";
 
 const INVITE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
@@ -86,12 +87,13 @@ export async function uploadProfileImage(formData: FormData) {
 
 export async function uploadProfileImageFromGooglePhotos(formData: FormData) {
   const ctx = await requireAuthedContext();
-  const accessToken = String(formData.get("accessToken") ?? "").trim();
   const baseUrl = String(formData.get("baseUrl") ?? "").trim();
   const fileNameRaw = String(formData.get("fileName") ?? "google-photos.jpg").trim();
 
-  if (!accessToken) throw new Error("Google認証情報が不足しています。");
   if (!baseUrl) throw new Error("Googleフォトの画像情報が不足しています。");
+
+  // クライアントに access_token を持たせない（NextAuth のGoogle連携からサーバ側で取得/更新する）
+  const accessToken = await getGoogleAccessTokenForUser(ctx.userId);
 
   // アバター用途のため縮小してダウンロード（最大5MB制限にも有利）
   const contentUrl = `${baseUrl}=w1024-h1024`;
@@ -152,7 +154,7 @@ export async function uploadProfileImageFromGooglePhotos(formData: FormData) {
 }
 
 export async function exchangeGoogleAuthCodeForPhotosAccessToken(formData: FormData) {
-  const ctx = await requireAuthedContext();
+  await requireAuthedContext();
   const code = String(formData.get("code") ?? "").trim();
   const redirectUri = String(formData.get("redirectUri") ?? "").trim();
   if (!code) throw new Error("Googleの認可コードがありません。");
@@ -176,11 +178,11 @@ export async function exchangeGoogleAuthCodeForPhotosAccessToken(formData: FormD
     cache: "no-store",
   });
   if (!res.ok) throw new Error("Googleトークン取得に失敗しました。");
-  const json = (await res.json()) as { access_token?: string };
+  const json = (await res.json()) as { access_token?: string; expires_in?: number };
   if (!json.access_token) throw new Error("Googleトークン取得に失敗しました。");
 
   // クライアントに返す（server action の戻り値として）
-  return { accessToken: json.access_token };
+  return { accessToken: json.access_token, expiresIn: typeof json.expires_in === "number" ? json.expires_in : null };
 }
 
 export async function updateHouseholdName(formData: FormData) {
