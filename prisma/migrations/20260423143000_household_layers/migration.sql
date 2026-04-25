@@ -13,6 +13,37 @@ CREATE INDEX "HouseholdLayer_householdId_sortOrder_idx" ON "HouseholdLayer"("hou
 
 ALTER TABLE "HouseholdLayer" ADD CONSTRAINT "HouseholdLayer_householdId_fkey" FOREIGN KEY ("householdId") REFERENCES "Household"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
+-- Safety: RecurringRule table may not exist in older migration chains
+DO $$
+BEGIN
+  IF to_regclass('public."RecurringRule"') IS NULL THEN
+    CREATE TABLE "RecurringRule" (
+        "id" TEXT NOT NULL,
+        "isActive" BOOLEAN NOT NULL DEFAULT true,
+        "type" "TransactionType" NOT NULL,
+        "dayOfMonth" INTEGER NOT NULL,
+        "amount" INTEGER NOT NULL,
+        "memo" TEXT,
+        "accountType" TEXT,
+        "startMonth" TEXT NOT NULL DEFAULT '1970-01',
+        "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        "updatedAt" TIMESTAMP(3) NOT NULL,
+        "householdId" TEXT NOT NULL,
+        "categoryId" TEXT,
+
+        CONSTRAINT "RecurringRule_pkey" PRIMARY KEY ("id")
+    );
+
+    CREATE INDEX "RecurringRule_householdId_isActive_idx" ON "RecurringRule"("householdId", "isActive");
+
+    ALTER TABLE "RecurringRule" ADD CONSTRAINT "RecurringRule_householdId_fkey"
+      FOREIGN KEY ("householdId") REFERENCES "Household"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+
+    ALTER TABLE "RecurringRule" ADD CONSTRAINT "RecurringRule_categoryId_fkey"
+      FOREIGN KEY ("categoryId") REFERENCES "Category"("id") ON DELETE SET NULL ON UPDATE CASCADE;
+  END IF;
+END $$;
+
 -- AlterTable
 ALTER TABLE "User" ADD COLUMN "preferredLayerId" TEXT;
 

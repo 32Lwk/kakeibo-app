@@ -151,6 +151,38 @@ export async function uploadProfileImageFromGooglePhotos(formData: FormData) {
   redirect("/settings");
 }
 
+export async function exchangeGoogleAuthCodeForPhotosAccessToken(formData: FormData) {
+  const ctx = await requireAuthedContext();
+  const code = String(formData.get("code") ?? "").trim();
+  const redirectUri = String(formData.get("redirectUri") ?? "").trim();
+  if (!code) throw new Error("Googleの認可コードがありません。");
+  if (!redirectUri) throw new Error("redirectUri がありません。");
+
+  const clientId = process.env.GOOGLE_CLIENT_ID;
+  const clientSecret = process.env.GOOGLE_CLIENT_SECRET;
+  if (!clientId || !clientSecret) throw new Error("GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET が設定されていません。");
+
+  const body = new URLSearchParams();
+  body.set("code", code);
+  body.set("client_id", clientId);
+  body.set("client_secret", clientSecret);
+  body.set("redirect_uri", redirectUri);
+  body.set("grant_type", "authorization_code");
+
+  const res = await fetch("https://oauth2.googleapis.com/token", {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body,
+    cache: "no-store",
+  });
+  if (!res.ok) throw new Error("Googleトークン取得に失敗しました。");
+  const json = (await res.json()) as { access_token?: string };
+  if (!json.access_token) throw new Error("Googleトークン取得に失敗しました。");
+
+  // クライアントに返す（server action の戻り値として）
+  return { accessToken: json.access_token };
+}
+
 export async function updateHouseholdName(formData: FormData) {
   const ctx = await requireAuthedContext();
   requireRole(ctx, "owner");

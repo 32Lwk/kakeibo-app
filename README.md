@@ -20,6 +20,8 @@ cp .env.example .env
 ```
 
 最低限 `DATABASE_URL` と `NEXTAUTH_SECRET` を設定してください。
+Googleログインを使う場合は `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` も設定してください。
+設定画面の「Googleフォト」から画像選択を使う場合は `NEXT_PUBLIC_GOOGLE_CLIENT_ID`（中身は `GOOGLE_CLIENT_ID` と同じ）も設定してください。
 
 2) DB接続（推奨: Neon）
 

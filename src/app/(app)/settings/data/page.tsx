@@ -1,5 +1,6 @@
 import { prisma } from "@/lib/db";
 import { requireAuthedContext, scopedTx } from "@/lib/authz";
+import Link from "next/link";
 
 export const dynamic = "force-dynamic";
 
@@ -43,7 +44,12 @@ export default async function DataSettingsPage() {
     <div className="space-y-6">
       <div className="space-y-1">
         <h1 className="text-2xl font-semibold tracking-tight">データ設定</h1>
-        <div className="text-sm text-black/60">CSVの取込/エクスポート、現在のデータ状況を確認できます。</div>
+        <div className="flex items-center gap-2 text-sm text-black/60">
+          <Link href="/settings" className="inline-flex items-center rounded-md px-1.5 py-0.5 hover:bg-black/[0.04]">
+            ← 設定
+          </Link>
+          <span>CSVの取込/エクスポート、現在のデータ状況を確認できます。</span>
+        </div>
       </div>
 
       <section className="grid gap-3 md:grid-cols-2">

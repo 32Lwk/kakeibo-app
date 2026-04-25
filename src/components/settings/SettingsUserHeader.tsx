@@ -18,7 +18,34 @@ import {
   updateProfileImage,
   uploadProfileImage,
   uploadProfileImageFromGooglePhotos,
+  exchangeGoogleAuthCodeForPhotosAccessToken,
 } from "@/app/(app)/settings/actions";
+
+type GisOauth2 = {
+  initTokenClient: (opts: {
+    client_id: string;
+    scope: string;
+    callback: (resp: { access_token?: string }) => void;
+    error_callback?: (resp: { type?: string }) => void;
+  }) => { requestAccessToken: (opts?: { prompt?: string }) => void };
+  initCodeClient: (opts: {
+    client_id: string;
+    scope: string;
+    ux_mode?: "popup" | "redirect";
+    redirect_uri?: string;
+    state?: string;
+    callback?: (resp: { code?: string; state?: string }) => void;
+    error_callback?: (resp: { type?: string }) => void;
+  }) => { requestCode: () => void };
+};
+
+type GisWindow = Window & {
+  google?: {
+    accounts?: {
+      oauth2?: GisOauth2;
+    };
+  };
+};
 
 export type SettingsUserHeaderMember = {
   id: string;
@@ -130,7 +157,6 @@ export function SettingsUserHeader({
   const [editingImage, setEditingImage] = useState(false);
   const [imageDraftUrl, setImageDraftUrl] = useState<string | null>(null);
   const [imageDraftFile, setImageDraftFile] = useState<File | null>(null);
-  const [imageDraftObjectUrl, setImageDraftObjectUrl] = useState<string | null>(null);
   const [googlePicked, setGooglePicked] = useState<{
     accessToken: string;
     baseUrl: string;
@@ -152,15 +178,15 @@ export function SettingsUserHeader({
 
   const displayName = (user.name ?? "").trim() || user.email || "ユーザー";
 
-  useEffect(() => {
-    if (!imageDraftFile) {
-      setImageDraftObjectUrl(null);
-      return;
-    }
-    const url = URL.createObjectURL(imageDraftFile);
-    setImageDraftObjectUrl(url);
-    return () => URL.revokeObjectURL(url);
+  const imageDraftObjectUrl = useMemo(() => {
+    if (!imageDraftFile) return null;
+    return URL.createObjectURL(imageDraftFile);
   }, [imageDraftFile]);
+
+  useEffect(() => {
+    if (!imageDraftObjectUrl) return;
+    return () => URL.revokeObjectURL(imageDraftObjectUrl);
+  }, [imageDraftObjectUrl]);
 
   useEffect(() => {
     if (!googlePreviewUrl) return;
@@ -176,7 +202,7 @@ export function SettingsUserHeader({
 
   async function ensureGisLoaded() {
     if (typeof window === "undefined") return;
-    if ((window as any).google?.accounts?.oauth2) return;
+    if ((window as GisWindow).google?.accounts?.oauth2) return;
     await new Promise<void>((resolve, reject) => {
       const existing = document.querySelector<HTMLScriptElement>('script[src="https://accounts.google.com/gsi/client"]');
       if (existing) {
@@ -194,31 +220,156 @@ export function SettingsUserHeader({
     });
   }
 
-  async function requestGoogleAccessToken(): Promise<string> {
-    await ensureGisLoaded();
+  function requestGoogleAccessToken(): Promise<string> {
+    // 重要: クリック直後の同期コンテキストで popup を開けるように、
+    // ここでは `await` しない（`await` が入るとポップアップがブロックされやすい）。
+    // GIS は useEffect で事前ロードしておく。
     const clientId = process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID;
-    if (!clientId) throw new Error("NEXT_PUBLIC_GOOGLE_CLIENT_ID が設定されていません。");
+    // Google Identity Services (ブラウザ側) では NEXT_PUBLIC_ のみ参照できる。
+    if (!clientId) {
+      throw new Error(
+        "NEXT_PUBLIC_GOOGLE_CLIENT_ID が設定されていません（値は .env の GOOGLE_CLIENT_ID と同じでOK）。開発サーバを再起動してください。",
+      );
+    }
 
-    return await new Promise<string>((resolve, reject) => {
-      const google = (window as any).google;
-      const tokenClient = google.accounts.oauth2.initTokenClient({
+    return new Promise<string>((resolve, reject) => {
+      const google = (window as GisWindow).google;
+      const oauth2 = google?.accounts?.oauth2;
+      if (!oauth2) {
+        reject(new Error("GISの初期化に失敗しました（読み込み待ち）。少し待ってからもう一度お試しください。"));
+        return;
+      }
+      const tokenClient = oauth2.initTokenClient({
         client_id: clientId,
         scope: "https://www.googleapis.com/auth/photospicker.mediaitems.readonly",
-        callback: (resp: any) => {
+        callback: (resp) => {
           if (!resp?.access_token) reject(new Error("Googleの認証に失敗しました。"));
           else resolve(resp.access_token as string);
         },
-        error_callback: () => reject(new Error("Googleの認証に失敗しました。")),
+        error_callback: (e) => {
+          const t = (e?.type ?? "").trim();
+          // GIS が返す type: popup_failed_to_open / popup_closed / unknown
+          reject(new Error(t ? `gis_error:${t}` : "gis_error:unknown"));
+        },
       });
       tokenClient.requestAccessToken({ prompt: "" });
     });
   }
 
+  async function requestGoogleAccessTokenViaRedirect(): Promise<never> {
+    await ensureGisLoaded();
+    const clientId = process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID;
+    if (!clientId) throw new Error("NEXT_PUBLIC_GOOGLE_CLIENT_ID が設定されていません。");
+    const oauth2 = (window as GisWindow).google?.accounts?.oauth2;
+    if (!oauth2) throw new Error("GISの初期化に失敗しました。");
+
+    const redirectUri = `${window.location.origin}/settings`;
+    const state = `gphotos_${Math.random().toString(36).slice(2)}`;
+    sessionStorage.setItem("gphotos_oauth_state", state);
+    sessionStorage.setItem("gphotos_oauth_redirect_uri", redirectUri);
+
+    await new Promise<void>((resolve, reject) => {
+      const codeClient = oauth2.initCodeClient({
+        client_id: clientId,
+        scope: "https://www.googleapis.com/auth/photospicker.mediaitems.readonly",
+        ux_mode: "redirect",
+        redirect_uri: redirectUri,
+        state,
+        error_callback: (e) => reject(new Error(e?.type ? `Google認証に失敗しました: ${e.type}` : "Google認証に失敗しました。")),
+      });
+      try {
+        codeClient.requestCode();
+        resolve();
+      } catch (e) {
+        reject(e instanceof Error ? e : new Error("Google認証の開始に失敗しました。"));
+      }
+    });
+
+    // redirect されるのでここには戻らない想定（戻ってきたらバグ）
+    throw new Error("redirecting");
+  }
+
+  useEffect(() => {
+    // popup ブロック回避のため、GIS は事前ロードしておく
+    ensureGisLoaded().catch(() => {
+      // 読み込み失敗時は、実行時に requestGoogleAccessToken 側でエラー表示する
+    });
+
+    // redirect UX の復帰処理: /settings?code=...&state=...
+    const url = new URL(window.location.href);
+    const code = url.searchParams.get("code");
+    const state = url.searchParams.get("state");
+    const expected = sessionStorage.getItem("gphotos_oauth_state");
+    const redirectUri = sessionStorage.getItem("gphotos_oauth_redirect_uri") || `${window.location.origin}/settings`;
+    if (!code || !state || !expected || state !== expected) return;
+
+    // URLを綺麗にしてから処理（再実行防止）
+    url.searchParams.delete("code");
+    url.searchParams.delete("scope");
+    url.searchParams.delete("state");
+    window.history.replaceState({}, "", url.toString());
+    sessionStorage.removeItem("gphotos_oauth_state");
+
+    (async () => {
+      try {
+        const fd = new FormData();
+        fd.set("code", code);
+        fd.set("redirectUri", redirectUri);
+        const { accessToken } = (await exchangeGoogleAuthCodeForPhotosAccessToken(fd)) as { accessToken: string };
+        // tokenClient が使えない環境向けに、ここでPickerを起動できるようにしておく
+        setGooglePicked(null);
+        setGooglePreviewUrl(null);
+        // 以降は既存フローと同じセッション作成へ
+        const createRes = await fetch("https://photospicker.googleapis.com/v1/sessions", {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${accessToken}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ pickingConfig: { maxMediaItems: 1 } }),
+        });
+        if (!createRes.ok) throw new Error("Google Photos Picker の開始に失敗しました。");
+        const session = (await createRes.json()) as { id: string; pickerUri: string };
+        const rawPickerUri = String(session.pickerUri ?? "").trim();
+        const pickerUri = rawPickerUri.replace(/\/$/, "") + "/autoclose";
+        window.location.href = pickerUri;
+      } catch (e) {
+        alert(e instanceof Error ? e.message : "Google認証に失敗しました。");
+      }
+    })();
+  }, []);
+
   async function pickFromGooglePhotos() {
     if (googlePicking) return;
     setGooglePicking(true);
+    const forceRedirect = sessionStorage.getItem("gphotos_force_redirect") === "1";
+    // async 後の window.open はポップアップブロックされやすいので、
+    // ユーザー操作直後にウィンドウだけ先に開いておく。
+    // NOTE: `noopener` を付けるとブラウザによっては window 参照が返らず、
+    // その後の `popup.location.href = ...` ができないことがある。
+    // セキュリティ上は遷移後に `opener` を切る。
+    const popup = forceRedirect ? null : window.open("about:blank", "_blank");
     try {
-      const accessToken = await requestGoogleAccessToken();
+      let accessToken: string;
+      if (forceRedirect) {
+        await requestGoogleAccessTokenViaRedirect();
+      }
+      try {
+        accessToken = await requestGoogleAccessToken();
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : "";
+        // ポップアップが開けない/閉じられた場合は redirect UX に切替（以後は固定）
+        if (msg.includes("gis_error:popup_failed_to_open") || msg.includes("gis_error:popup_closed") || msg.includes("gis_error:")) {
+          sessionStorage.setItem("gphotos_force_redirect", "1");
+          try {
+            popup?.close();
+          } catch {
+            // noop
+          }
+          await requestGoogleAccessTokenViaRedirect();
+        }
+        throw e;
+      }
       const createRes = await fetch("https://photospicker.googleapis.com/v1/sessions", {
         method: "POST",
         headers: {
@@ -237,8 +388,54 @@ export function SettingsUserHeader({
         pickerUri: string;
         pollingConfig?: { pollInterval?: string; timeoutIn?: string };
       };
-      const pickerUri = `${session.pickerUri}/autoclose`;
-      window.open(pickerUri, "_blank", "noopener,noreferrer");
+      const rawPickerUri = String(session.pickerUri ?? "").trim();
+      if (!rawPickerUri.startsWith("http")) {
+        throw new Error(`Google Photos Picker のURLが不正です: ${rawPickerUri || "（空）"}`);
+      }
+      const pickerUri = rawPickerUri.replace(/\/$/, "") + "/autoclose";
+      if (!popup) {
+        // フォールバック（同一タブ）。ユーザー操作から時間が経っているため `window.open` は通りにくい。
+        window.location.href = pickerUri;
+        return;
+      }
+      // 遷移がブロックされる環境でもユーザーが進めるよう、タブ内にリンクを残す。
+      try {
+        popup.document.open();
+        popup.document.write(`<!doctype html>
+<meta charset="utf-8" />
+<title>Google Photos Picker を開いています…</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<body style="font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; padding: 24px;">
+  <h1 style="font-size: 16px; margin: 0 0 12px;">Google Photos Picker を開いています…</h1>
+  <p style="font-size: 13px; color: #444; margin: 0 0 16px;">
+    自動で遷移しない場合は、下のリンクをクリックしてください。
+  </p>
+  <p style="margin: 0 0 16px;">
+    <a href="${pickerUri}" target="_self" rel="noreferrer" style="font-size: 14px;">Google Photos Picker を開く</a>
+  </p>
+  <p style="font-size: 12px; color: #666; margin: 0;">
+    URL: <span style="font-family: ui-monospace, SFMono-Regular, Menlo, monospace;">${pickerUri}</span>
+  </p>
+</body>`);
+        popup.document.close();
+      } catch {
+        // noop (クロスオリジンなどで document が触れない環境向け)
+      }
+      try {
+        popup.location.replace(pickerUri);
+      } catch {
+        popup.location.href = pickerUri;
+      }
+      try {
+        popup.opener = null;
+      } catch {
+        // noop
+      }
+      try {
+        popup.focus();
+      } catch {
+        // noop
+      }
 
       const startedAt = Date.now();
       let pollIntervalMs = 1200;
@@ -300,6 +497,10 @@ export function SettingsUserHeader({
       setImageDraftUrl(null);
       if (fileInputRef.current) fileInputRef.current.value = "";
     } finally {
+      if (popup && popup.location.href === "about:blank") {
+        // 失敗した場合などに空タブが残らないようにする
+        popup.close();
+      }
       setGooglePicking(false);
     }
   }
@@ -343,7 +544,7 @@ export function SettingsUserHeader({
             onClick={() => setOpen(false)}
           />
           <div
-            className="relative max-h-[90dvh] w-full max-w-lg overflow-y-auto rounded-t-3xl border border-black/10 bg-white shadow-lg sm:rounded-3xl"
+            className="relative flex max-h-[90dvh] w-full max-w-lg flex-col overflow-hidden rounded-t-3xl border border-black/10 bg-white shadow-lg sm:rounded-3xl"
             role="dialog"
             aria-modal="true"
             aria-labelledby="settings-user-dialog-title"
@@ -361,7 +562,7 @@ export function SettingsUserHeader({
               </button>
             </div>
 
-            <div className="space-y-6 px-5 py-5">
+            <div className="app-scrollbar min-h-0 flex-1 space-y-6 overflow-y-auto px-5 py-5">
               <div className="flex items-center gap-3">
                 <button
                   type="button"
@@ -423,7 +624,25 @@ export function SettingsUserHeader({
 
               {editingImage ? (
                 <section className="space-y-2 rounded-xl border border-black/10 bg-black/[0.02] p-4">
-                  <h3 className="text-sm font-medium text-neutral-900">アイコン画像を変更</h3>
+                  <div className="flex items-center justify-between">
+                    <h3 className="text-sm font-medium text-neutral-900">アイコン画像を変更</h3>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setEditingImage(false);
+                        setImageDraftFile(null);
+                        setImageDraftUrl(null);
+                        setGooglePicked(null);
+                        setGooglePreviewUrl(null);
+                        if (fileInputRef.current) fileInputRef.current.value = "";
+                      }}
+                      className="inline-flex size-8 items-center justify-center rounded-full text-black/60 hover:bg-black/[0.06] hover:text-black"
+                      aria-label="閉じる"
+                      title="閉じる"
+                    >
+                      <IconX className="size-4" />
+                    </button>
+                  </div>
                   <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                     <div className="flex items-center gap-3">
                       <Avatar name={user.name} email={user.email} image={imagePreviewSrc ?? null} size="lg" />
@@ -432,17 +651,6 @@ export function SettingsUserHeader({
                         <div className="text-[11px] text-black/45">選択した画像が、この家計簿内でのみ表示されます（最大5MB）。</div>
                       </div>
                     </div>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setEditingImage(false);
-                        setImageDraftFile(null);
-                        setImageDraftUrl(null);
-                      }}
-                      className="shrink-0 rounded-xl border border-black/15 bg-white px-4 py-2 text-sm font-medium text-neutral-900 hover:bg-black/[0.03]"
-                    >
-                      閉じる
-                    </button>
                   </div>
 
                   <form ref={uploadFormRef} action={uploadProfileImage} className="flex flex-col gap-2 sm:flex-row">
@@ -480,8 +688,8 @@ export function SettingsUserHeader({
                       onClick={async () => {
                         try {
                           await pickFromGooglePhotos();
-                        } catch {
-                          // UI上は黙って戻す（既存フォーム送信と同様、詳細は必要なら後でトースト化）
+                        } catch (e) {
+                          alert(e instanceof Error ? e.message : "Googleフォトの起動に失敗しました。");
                         }
                       }}
                       className="inline-flex items-center justify-center gap-2 rounded-xl border border-black/15 bg-white px-4 py-2 text-sm font-medium text-neutral-900 hover:bg-black/[0.03]"
