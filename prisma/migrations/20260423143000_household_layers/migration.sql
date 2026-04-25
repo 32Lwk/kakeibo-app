@@ -72,6 +72,20 @@ ALTER TABLE "Transaction" ALTER COLUMN "layerId" SET NOT NULL;
 ALTER TABLE "RecurringRule" ALTER COLUMN "layerId" SET NOT NULL;
 ALTER TABLE "Receipt" ALTER COLUMN "layerId" SET NOT NULL;
 
+-- Compatibility: this migration expects generated* columns (added in 20260423130000_recurring_rules),
+-- but shadow DB chains can be missing them due to drift/branching. Ensure they exist before indexing.
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'GeneratedKind') THEN
+    CREATE TYPE "GeneratedKind" AS ENUM ('recurring', 'carryover_account', 'carryover_category');
+  END IF;
+END $$;
+
+ALTER TABLE "Transaction"
+  ADD COLUMN IF NOT EXISTS "generatedKind" "GeneratedKind",
+  ADD COLUMN IF NOT EXISTS "generatedMonth" TEXT,
+  ADD COLUMN IF NOT EXISTS "generatedKey" TEXT;
+
 DROP INDEX IF EXISTS "Transaction_householdId_generatedKind_generatedMonth_generatedKey_key";
 
 CREATE UNIQUE INDEX "Transaction_householdId_layerId_generatedKind_generatedMonth_generatedKey_key" ON "Transaction"("householdId", "layerId", "generatedKind", "generatedMonth", "generatedKey");

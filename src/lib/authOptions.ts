@@ -22,6 +22,19 @@ export const authOptions: NextAuthOptions = {
       clientId: process.env.GOOGLE_CLIENT_ID ?? "",
       clientSecret: process.env.GOOGLE_CLIENT_SECRET ?? "",
       allowDangerousEmailAccountLinking: true,
+      authorization: {
+        params: {
+          // Picker API 用に scope を追加し、refresh_token を確実に得る
+          access_type: "offline",
+          prompt: "consent",
+          scope: [
+            "openid",
+            "email",
+            "profile",
+            "https://www.googleapis.com/auth/photospicker.mediaitems.readonly",
+          ].join(" "),
+        },
+      },
     }),
     CredentialsProvider({
       name: "Email & Password",
