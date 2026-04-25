@@ -10,8 +10,8 @@ export default function SignupPage() {
 
   return (
     <div className="flex flex-1 items-center justify-center px-6 py-12">
-      <div className="w-full max-w-md rounded-2xl border border-black/10 bg-white p-6 shadow-sm">
-        <h1 className="text-2xl font-semibold tracking-tight">アカウント作成</h1>
+      <div className="w-full max-w-md rounded-2xl border border-black/10 bg-white p-6 text-neutral-900 shadow-sm">
+        <h1 className="text-2xl font-semibold tracking-tight text-neutral-950">アカウント作成</h1>
         <p className="mt-2 text-sm text-black/60">
           メールアドレスとパスワードで作成します（8文字以上）。
         </p>
@@ -52,17 +52,17 @@ export default function SignupPage() {
           }}
         >
           <div className="space-y-1">
-            <label className="text-sm font-medium" htmlFor="name">
+            <label className="text-sm font-medium text-neutral-800" htmlFor="name">
               名前（任意）
             </label>
             <input
               id="name"
               name="name"
-              className="w-full rounded-xl border border-black/15 px-3 py-2 outline-none focus:border-black/40"
+              className="w-full rounded-xl border border-black/15 bg-white px-3 py-2 text-neutral-900 outline-none focus:border-black/40"
             />
           </div>
           <div className="space-y-1">
-            <label className="text-sm font-medium" htmlFor="email">
+            <label className="text-sm font-medium text-neutral-800" htmlFor="email">
               メールアドレス
             </label>
             <input
@@ -70,11 +70,11 @@ export default function SignupPage() {
               name="email"
               type="email"
               required
-              className="w-full rounded-xl border border-black/15 px-3 py-2 outline-none focus:border-black/40"
+              className="w-full rounded-xl border border-black/15 bg-white px-3 py-2 text-neutral-900 outline-none focus:border-black/40"
             />
           </div>
           <div className="space-y-1">
-            <label className="text-sm font-medium" htmlFor="password">
+            <label className="text-sm font-medium text-neutral-800" htmlFor="password">
               パスワード
             </label>
             <input
@@ -83,7 +83,7 @@ export default function SignupPage() {
               type="password"
               required
               minLength={8}
-              className="w-full rounded-xl border border-black/15 px-3 py-2 outline-none focus:border-black/40"
+              className="w-full rounded-xl border border-black/15 bg-white px-3 py-2 text-neutral-900 outline-none focus:border-black/40"
             />
           </div>
           <button className="w-full rounded-xl bg-black px-3 py-2 text-white hover:bg-black/90">
@@ -93,7 +93,10 @@ export default function SignupPage() {
         </form>
 
         <div className="mt-6 text-sm">
-          <a className="underline" href="/login">
+          <a
+            className="font-medium text-neutral-800 underline decoration-neutral-400 underline-offset-2 hover:text-neutral-950"
+            href="/login"
+          >
             ログインへ戻る
           </a>
         </div>

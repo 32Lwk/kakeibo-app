@@ -1,42 +1,40 @@
 import { prisma } from "@/lib/db";
-import { getSession } from "@/lib/session";
+import { requireAuthedContext } from "@/lib/authz";
 import { redirect } from "next/navigation";
 
 export const dynamic = "force-dynamic";
 
 export default async function RecurringSettingsPage() {
-  const session = await getSession();
-  const userId = (session?.user as any)?.id as string | undefined;
-  if (!userId) return null;
+  const ctx = await requireAuthedContext({ onUnauthorized: "redirect" });
 
-  const membership = await prisma.membership.findFirst({
-    where: { userId },
-    select: { householdId: true },
-    orderBy: { createdAt: "asc" },
-  });
-  if (!membership) return null;
-
-  const categories = await prisma.category.findMany({
-    where: { householdId: membership.householdId },
-    select: { id: true, name: true },
-    orderBy: [{ sortOrder: "asc" }, { name: "asc" }],
-  });
-
-  const rules = await prisma.recurringRule.findMany({
-    where: { householdId: membership.householdId },
-    orderBy: [{ isActive: "desc" }, { dayOfMonth: "asc" }, { createdAt: "desc" }],
-    select: {
-      id: true,
-      isActive: true,
-      type: true,
-      dayOfMonth: true,
-      amount: true,
-      memo: true,
-      accountType: true,
-      startMonth: true,
-      category: { select: { name: true } },
-    },
-  });
+  const [categories, rules, layers] = await Promise.all([
+    prisma.category.findMany({
+      where: { householdId: ctx.householdId },
+      select: { id: true, name: true },
+      orderBy: [{ sortOrder: "asc" }, { name: "asc" }],
+    }),
+    prisma.recurringRule.findMany({
+      where: { householdId: ctx.householdId },
+      orderBy: [{ isActive: "desc" }, { dayOfMonth: "asc" }, { createdAt: "desc" }],
+      select: {
+        id: true,
+        isActive: true,
+        type: true,
+        dayOfMonth: true,
+        amount: true,
+        memo: true,
+        accountType: true,
+        startMonth: true,
+        category: { select: { name: true } },
+        layer: { select: { name: true } },
+      },
+    }),
+    prisma.householdLayer.findMany({
+      where: { householdId: ctx.householdId },
+      orderBy: [{ sortOrder: "asc" }, { createdAt: "asc" }],
+      select: { id: true, name: true },
+    }),
+  ]);
 
   return (
     <div className="space-y-6">
@@ -54,6 +52,7 @@ export default async function RecurringSettingsPage() {
         className="max-w-2xl space-y-4 rounded-2xl border border-black/10 bg-white p-6"
         action={async (formData) => {
           "use server";
+          const actx = await requireAuthedContext();
           const type = String(formData.get("type") ?? "expense");
           const dayOfMonth = Number(formData.get("dayOfMonth"));
           const amount = Number(formData.get("amount"));
@@ -61,16 +60,29 @@ export default async function RecurringSettingsPage() {
           const categoryId = String(formData.get("categoryId") ?? "").trim() || null;
           const accountType = String(formData.get("accountType") ?? "").trim() || null;
           const startMonth = String(formData.get("startMonth") ?? "").trim() || null;
+          const layerId = String(formData.get("layerId") ?? "").trim() || actx.activeLayerId;
+
+          const layerOk = await prisma.householdLayer.findFirst({
+            where: { id: layerId, householdId: actx.householdId },
+            select: { id: true },
+          });
+          if (!layerOk) throw new Error("レイヤーが不正です。");
+
+          const cats = await prisma.category.findMany({
+            where: { householdId: actx.householdId },
+            select: { id: true },
+          });
 
           if (!["expense", "income"].includes(type)) throw new Error("不正な値です。");
           if (!Number.isFinite(dayOfMonth) || dayOfMonth < 1 || dayOfMonth > 28) throw new Error("不正な値です。");
           if (!Number.isFinite(amount) || amount <= 0) throw new Error("不正な値です。");
-          if (categoryId && !categories.some((c) => c.id === categoryId)) throw new Error("不正な値です。");
+          if (categoryId && !cats.some((c) => c.id === categoryId)) throw new Error("不正な値です。");
           if (startMonth && !/^\d{4}-\d{2}$/.test(startMonth)) throw new Error("不正な値です。");
 
           await prisma.recurringRule.create({
             data: {
-              householdId: membership.householdId,
+              householdId: actx.householdId,
+              layerId,
               type: type as any,
               dayOfMonth,
               amount: Math.trunc(amount),
@@ -85,6 +97,24 @@ export default async function RecurringSettingsPage() {
         }}
       >
         <div className="grid gap-4 md:grid-cols-2">
+          <div className="space-y-1">
+            <label className="text-sm font-medium" htmlFor="layerId">
+              反映するレイヤー
+            </label>
+            <select
+              id="layerId"
+              name="layerId"
+              defaultValue={ctx.activeLayerId}
+              className="w-full rounded-xl border border-black/15 bg-white px-3 py-2"
+            >
+              {layers.map((l) => (
+                <option key={l.id} value={l.id}>
+                  {l.name}
+                </option>
+              ))}
+            </select>
+            <div className="text-xs text-black/50">自動登録される明細はこのレイヤーに付きます。</div>
+          </div>
           <div className="space-y-1">
             <label className="text-sm font-medium" htmlFor="type">
               種別
@@ -221,6 +251,7 @@ export default async function RecurringSettingsPage() {
                   {r.type === "income" ? "定期収入" : "固定費"} / {r.dayOfMonth}日 / ¥
                   {new Intl.NumberFormat("ja-JP").format(r.amount)}
                   {r.category?.name ? ` / ${r.category.name}` : ""}
+                  {r.layer?.name ? ` / レイヤー: ${r.layer.name}` : ""}
                   {r.accountType ? ` / ${r.accountType}` : ""}
                   {r.startMonth ? ` / ${r.startMonth}〜` : ""}
                 </div>

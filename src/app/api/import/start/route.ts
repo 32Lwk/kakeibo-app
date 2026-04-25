@@ -1,5 +1,5 @@
 import { prisma } from "@/lib/db";
-import { requireAuthedContext, requireRole } from "@/lib/authz";
+import { requireAuthedContext, requireRole, scopedTx } from "@/lib/authz";
 import Papa from "papaparse";
 import fs from "node:fs/promises";
 import os from "node:os";
@@ -50,6 +50,7 @@ async function runImportJob({
 }) {
   const ctx = await requireAuthedContext();
   requireRole(ctx, "editor");
+  const txWhere = scopedTx(ctx);
 
   const update = async (summary: ImportProgressSummary) => {
     await prisma.import.update({
@@ -174,7 +175,7 @@ async function runImportJob({
       const start = new Date(minPurchaseDate.getFullYear(), minPurchaseDate.getMonth(), minPurchaseDate.getDate());
       const end = new Date(maxPurchaseDate.getFullYear(), maxPurchaseDate.getMonth(), maxPurchaseDate.getDate() + 1);
       const existing = await prisma.transaction.findMany({
-        where: { householdId: ctx.householdId, purchaseDate: { gte: start, lt: end } },
+        where: { ...txWhere, purchaseDate: { gte: start, lt: end } },
         select: { purchaseDate: true, totalAmount: true, type: true, memo: true },
       });
       for (const t of existing) {
@@ -184,6 +185,7 @@ async function runImportJob({
 
     const creates: Array<{
       householdId: string;
+      layerId: string;
       type: "expense" | "income";
       purchaseDate: Date;
       totalAmount: number;
@@ -200,6 +202,7 @@ async function runImportJob({
       existingKeySet.add(r.key);
       creates.push({
         householdId: ctx.householdId,
+        layerId: txWhere.layerId,
         type: r.type,
         purchaseDate: r.purchaseDate,
         totalAmount: r.totalAmount,
@@ -231,6 +234,7 @@ async function runImportJob({
         await prisma.transaction.create({
           data: {
             householdId: c.householdId,
+            layerId: c.layerId,
             type: c.type,
             purchaseDate: c.purchaseDate,
             totalAmount: c.totalAmount,

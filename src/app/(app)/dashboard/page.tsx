@@ -1,6 +1,6 @@
 import { prisma } from "@/lib/db";
 import { ensureGeneratedForMonth } from "@/lib/monthGeneration";
-import { requireAuthedContext } from "@/lib/authz";
+import { requireAuthedContext, scopedTx } from "@/lib/authz";
 import { DashboardCharts } from "@/components/DashboardCharts";
 
 export const dynamic = "force-dynamic";
@@ -42,13 +42,21 @@ export default async function DashboardPage({
 }: {
   searchParams?: Promise<Record<string, string | string[] | undefined>>;
 }) {
-  const ctx = await requireAuthedContext();
+  const ctx = await requireAuthedContext({ onUnauthorized: "redirect" });
+  const txWhere = scopedTx(ctx);
 
   const user = await prisma.user.findUnique({
     where: { id: ctx.userId },
     select: { summaryOrder: true },
   });
   if (!user) return null;
+
+  const pendingJoinRequests =
+    ctx.role === "owner"
+      ? await prisma.householdJoinRequest.count({
+          where: { householdId: ctx.householdId, status: "pending" },
+        })
+      : 0;
 
   const unwrappedSearchParams = searchParams ? await searchParams : undefined;
   await ensureGeneratedForMonth({
@@ -76,7 +84,7 @@ export default async function DashboardPage({
 
   const txs = await prisma.transaction.findMany({
     where: {
-      householdId: ctx.householdId,
+      ...txWhere,
       purchaseDate: { gte: start, lt: end },
     },
     orderBy: { purchaseDate: "desc" },
@@ -110,7 +118,7 @@ export default async function DashboardPage({
     by: ["categoryId"],
     where: {
       transaction: {
-        householdId: ctx.householdId,
+        ...txWhere,
         type: "expense",
         purchaseDate: { gte: start, lt: end },
       },
@@ -124,7 +132,7 @@ export default async function DashboardPage({
     by: ["categoryId"],
     where: {
       transaction: {
-        householdId: ctx.householdId,
+        ...txWhere,
         type: "income",
         purchaseDate: { gte: start, lt: end },
       },
@@ -138,7 +146,7 @@ export default async function DashboardPage({
     by: ["categoryId"],
     where: {
       transaction: {
-        householdId: ctx.householdId,
+        ...txWhere,
         type: "expense",
         purchaseDate: { gte: yearStart, lt: yearEnd },
       },
@@ -152,7 +160,7 @@ export default async function DashboardPage({
     by: ["categoryId"],
     where: {
       transaction: {
-        householdId: ctx.householdId,
+        ...txWhere,
         type: "income",
         purchaseDate: { gte: yearStart, lt: yearEnd },
       },
@@ -201,7 +209,7 @@ export default async function DashboardPage({
           where: {
             categoryId: selectedCategoryId,
             transaction: {
-              householdId: ctx.householdId,
+              ...txWhere,
               type: kind,
               purchaseDate: { gte: seriesStart, lt: seriesEnd },
             },
@@ -226,7 +234,7 @@ export default async function DashboardPage({
     selectedCategoryId
       ? await prisma.transaction.findMany({
           where: {
-            householdId: ctx.householdId,
+            ...txWhere,
             type: kind,
             purchaseDate: { gte: start, lt: end },
             splits: { some: { categoryId: selectedCategoryId } },
@@ -253,6 +261,18 @@ export default async function DashboardPage({
 
   return (
     <div className="space-y-6">
+      {pendingJoinRequests > 0 ? (
+        <div className="rounded-2xl border border-black/10 bg-white p-4 shadow-sm">
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+            <div className="text-sm text-neutral-900">
+              <span className="font-medium">参加申請が {pendingJoinRequests} 件</span> あります。設定から承認/却下できます。
+            </div>
+            <a href="/settings" className="shrink-0 rounded-xl bg-black px-4 py-2 text-sm font-medium text-white hover:bg-black/90">
+              確認する
+            </a>
+          </div>
+        </div>
+      ) : null}
       <section className="rounded-2xl border border-black/10 bg-zinc-50 p-4 min-h-[calc(100dvh-220px)] flex flex-col">
         <DashboardCharts
           view={view}

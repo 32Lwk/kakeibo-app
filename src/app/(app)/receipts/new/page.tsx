@@ -1,12 +1,12 @@
 import { prisma } from "@/lib/db";
-import { requireAuthedContext, requireRole } from "@/lib/authz";
+import { requireAuthedContext, requireRole, scopedTx } from "@/lib/authz";
 import { saveUpload } from "@/lib/storage";
 import { redirect } from "next/navigation";
 
 export const dynamic = "force-dynamic";
 
 export default async function NewReceiptPage() {
-  const ctx = await requireAuthedContext();
+  const ctx = await requireAuthedContext({ onUnauthorized: "redirect" });
   requireRole(ctx, "editor");
 
   return (
@@ -24,13 +24,14 @@ export default async function NewReceiptPage() {
           "use server";
           const ctx = await requireAuthedContext();
           requireRole(ctx, "editor");
+          const rxWhere = scopedTx(ctx);
 
           const file = formData.get("file");
           if (!(file instanceof File)) throw new Error("画像ファイルを選択してください。");
           if (!file.type.startsWith("image/")) throw new Error("画像ファイルのみ対応しています。");
 
           const receipt = await prisma.receipt.create({
-            data: { householdId: ctx.householdId, status: "pending" },
+            data: { householdId: rxWhere.householdId, layerId: rxWhere.layerId, status: "pending" },
             select: { id: true },
           });
 

@@ -29,9 +29,24 @@ export async function ensureDefaultHouseholdForUser(userId: string) {
       categories: {
         create: DEFAULT_CATEGORIES,
       },
+      layers: {
+        create: [{ name: "メイン", sortOrder: 0 }],
+      },
     },
     select: { id: true },
   });
+
+  const mainLayer = await prisma.householdLayer.findFirst({
+    where: { householdId: household.id },
+    orderBy: [{ sortOrder: "asc" }, { createdAt: "asc" }],
+    select: { id: true },
+  });
+  if (mainLayer) {
+    await prisma.user.update({
+      where: { id: userId },
+      data: { preferredLayerId: mainLayer.id },
+    });
+  }
 
   return household.id;
 }

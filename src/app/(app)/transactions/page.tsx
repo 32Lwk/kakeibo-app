@@ -1,5 +1,5 @@
 import { prisma } from "@/lib/db";
-import { requireAuthedContext } from "@/lib/authz";
+import { requireAuthedContext, scopedTx } from "@/lib/authz";
 import { ensureGeneratedForMonth } from "@/lib/monthGeneration";
 
 export const dynamic = "force-dynamic";
@@ -39,7 +39,8 @@ export default async function TransactionsPage({
 }: {
   searchParams?: Promise<Record<string, string | string[] | undefined>>;
 }) {
-  const ctx = await requireAuthedContext();
+  const ctx = await requireAuthedContext({ onUnauthorized: "redirect" });
+  const txWhere = scopedTx(ctx);
 
   const user = await prisma.user.findUnique({
     where: { id: ctx.userId },
@@ -74,7 +75,7 @@ export default async function TransactionsPage({
 
   const txs = await prisma.transaction.findMany({
     where: {
-      householdId: ctx.householdId,
+      ...txWhere,
       purchaseDate: { gte: start, lt: end },
       ...(q
         ? {

@@ -1,10 +1,11 @@
 import { prisma } from "@/lib/db";
-import { requireAuthedContext, requireRole } from "@/lib/authz";
+import { requireAuthedContext, requireRole, scopedTx } from "@/lib/authz";
 
 export async function POST(req: Request) {
   try {
     const ctx = await requireAuthedContext();
     requireRole(ctx, "editor");
+    const txw = scopedTx(ctx);
 
     const body = (await req.json().catch(() => null)) as null | { ids?: string[] };
     const ids = Array.from(new Set((body?.ids ?? []).map(String))).filter(Boolean).slice(0, 500);
@@ -12,14 +13,14 @@ export async function POST(req: Request) {
 
     // only within household
     const found = await prisma.transaction.findMany({
-      where: { householdId: ctx.householdId, id: { in: ids } },
+      where: { ...txw, id: { in: ids } },
       select: { id: true },
     });
     const foundIds = found.map((t) => t.id);
     if (foundIds.length === 0) return Response.json({ ok: true, deleted: 0 });
 
     const res = await prisma.transaction.deleteMany({
-      where: { householdId: ctx.householdId, id: { in: foundIds } },
+      where: { ...txw, id: { in: foundIds } },
     });
 
     await prisma.auditLog.create({

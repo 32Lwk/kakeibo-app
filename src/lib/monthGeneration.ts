@@ -62,15 +62,22 @@ export async function ensureGeneratedForMonth({
     await ensureRecurringForMonth({ prisma, householdId, month: m.month, year: m.year, monthIndex: m.monthIndex });
   }
   if (user.carryoverEnabled) {
-    await ensureCarryoverForMonth({
-      prisma,
-      householdId,
-      month: m.month,
-      year: m.year,
-      monthIndex: m.monthIndex,
-      start,
-      end,
+    const layers = await prisma.householdLayer.findMany({
+      where: { householdId },
+      select: { id: true },
     });
+    for (const { id: layerId } of layers) {
+      await ensureCarryoverForMonth({
+        prisma,
+        householdId,
+        layerId,
+        month: m.month,
+        year: m.year,
+        monthIndex: m.monthIndex,
+        start,
+        end,
+      });
+    }
   }
 }
 
@@ -89,7 +96,16 @@ async function ensureRecurringForMonth({
 }) {
   const rules = await prisma.recurringRule.findMany({
     where: { householdId, isActive: true, startMonth: { lte: month } },
-    select: { id: true, type: true, dayOfMonth: true, amount: true, memo: true, categoryId: true, accountType: true },
+    select: {
+      id: true,
+      type: true,
+      dayOfMonth: true,
+      amount: true,
+      memo: true,
+      categoryId: true,
+      accountType: true,
+      layerId: true,
+    },
     orderBy: [{ dayOfMonth: "asc" }, { createdAt: "asc" }],
   });
   if (rules.length === 0) return;
@@ -111,6 +127,7 @@ async function ensureRecurringForMonth({
       await prisma.transaction.create({
         data: {
           householdId,
+          layerId: r.layerId,
           type: r.type,
           purchaseDate,
           totalAmount: r.amount,
@@ -124,7 +141,6 @@ async function ensureRecurringForMonth({
         },
       });
     } catch (e) {
-      // ignore duplicates
       if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === "P2002") continue;
       throw e;
     }
@@ -134,6 +150,7 @@ async function ensureRecurringForMonth({
 async function ensureCarryoverForMonth({
   prisma,
   householdId,
+  layerId,
   month,
   year,
   monthIndex,
@@ -142,6 +159,7 @@ async function ensureCarryoverForMonth({
 }: {
   prisma: PrismaClient;
   householdId: string;
+  layerId: string;
   month: string;
   year: number;
   monthIndex: number;
@@ -154,9 +172,8 @@ async function ensureCarryoverForMonth({
     new Date(year, monthIndex - 1, 1).getMonth(),
   );
 
-  // Carry over only net income/expense of the previous month (single transaction)
   const prevTxs = await prisma.transaction.findMany({
-    where: { householdId, purchaseDate: { gte: prevStart, lt: prevEnd } },
+    where: { householdId, layerId, purchaseDate: { gte: prevStart, lt: prevEnd } },
     select: { type: true, totalAmount: true },
   });
 
@@ -170,6 +187,7 @@ async function ensureCarryoverForMonth({
     await prisma.transaction.create({
       data: {
         householdId,
+        layerId,
         type: net >= 0 ? TransactionType.income : TransactionType.expense,
         purchaseDate: monthFirst,
         totalAmount: Math.abs(net),
@@ -186,4 +204,3 @@ async function ensureCarryoverForMonth({
     throw e;
   }
 }
-

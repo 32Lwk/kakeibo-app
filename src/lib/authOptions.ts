@@ -13,6 +13,8 @@ const credentialsSchema = z.object({
 });
 
 export const authOptions: NextAuthOptions = {
+  secret: process.env.NEXTAUTH_SECRET,
+  debug: process.env.NODE_ENV === "development",
   adapter: PrismaAdapter(prisma),
   session: { strategy: "database" },
   providers: [
@@ -50,11 +52,16 @@ export const authOptions: NextAuthOptions = {
   },
   events: {
     signIn: async ({ user }) => {
-      await ensureDefaultHouseholdForUser(user.id);
+      try {
+        await ensureDefaultHouseholdForUser(user.id);
+      } catch (e) {
+        console.error("[auth] ensureDefaultHouseholdForUser failed after signIn", e);
+      }
     },
   },
   pages: {
     signIn: "/login",
+    error: "/login",
   },
 };
 

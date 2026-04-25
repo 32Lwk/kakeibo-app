@@ -1,5 +1,5 @@
 import { prisma } from "@/lib/db";
-import { requireAuthedContext, requireRole } from "@/lib/authz";
+import { requireAuthedContext, requireRole, scopedTx } from "@/lib/authz";
 import { redirect } from "next/navigation";
 import { z } from "zod";
 import { runVisionOcr, structureWithOpenAI } from "@/lib/receiptProcessing";
@@ -22,11 +22,12 @@ const confirmSchema = z.object({
 });
 
 export default async function ReceiptDetailPage({ params }: { params: Promise<{ id: string }> }) {
-  const ctx = await requireAuthedContext();
+  const ctx = await requireAuthedContext({ onUnauthorized: "redirect" });
+  const rxWhere = scopedTx(ctx);
   const { id } = await params;
 
   const receipt = await prisma.receipt.findFirst({
-    where: { id, householdId: ctx.householdId },
+    where: { id, ...rxWhere },
     select: {
       id: true,
       status: true,
@@ -102,9 +103,10 @@ export default async function ReceiptDetailPage({ params }: { params: Promise<{ 
                 "use server";
                 const ctx = await requireAuthedContext();
                 requireRole(ctx, "editor");
+                const scope = scopedTx(ctx);
 
                 const receipt = await prisma.receipt.findFirst({
-                  where: { id, householdId: ctx.householdId },
+                  where: { id, ...scope },
                   select: {
                     id: true,
                     attachments: { select: { id: true, gcsObjectKey: true } },
@@ -201,6 +203,7 @@ export default async function ReceiptDetailPage({ params }: { params: Promise<{ 
           "use server";
           const ctx = await requireAuthedContext();
           requireRole(ctx, "editor");
+          const scope = scopedTx(ctx);
 
           const parsed = confirmSchema.safeParse({
             storeName: String(formData.get("storeName") ?? "") || undefined,
@@ -234,8 +237,8 @@ export default async function ReceiptDetailPage({ params }: { params: Promise<{ 
           if (splits.data.some((s) => !categoryIds.has(s.categoryId))) throw new Error("カテゴリが不正です。");
 
           const receipt = await prisma.receipt.findFirst({
-            where: { id, householdId: ctx.householdId },
-            select: { id: true },
+            where: { id, ...scope },
+            select: { id: true, layerId: true },
           });
           if (!receipt) throw new Error("レシートが見つかりません。");
 
@@ -243,6 +246,7 @@ export default async function ReceiptDetailPage({ params }: { params: Promise<{ 
             const created = await txPrisma.transaction.create({
               data: {
                 householdId: ctx.householdId,
+                layerId: receipt.layerId,
                 type: "expense",
                 purchaseDate,
                 totalAmount: raw.totalAmount,

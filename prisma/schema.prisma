@@ -31,6 +31,12 @@ enum ReceiptStatus {
   failed
 }
 
+enum JoinRequestStatus {
+  pending
+  approved
+  rejected
+}
+
 model User {
   id           String   @id @default(cuid())
   email        String?  @unique
@@ -47,6 +53,10 @@ model User {
   carryoverEnabled Boolean @default(true)
   carryoverNote  String? // freeform memo for rules (MVP)
   recurringAutoApply Boolean @default(true)
+  /// 複数世帯に所属する場合の「現在の家計簿」（未設定時は最古のメンバーシップを使用）
+  preferredHouseholdId String?
+  /// 現在の家計簿内で表示・入力に使うレイヤー（未設定時は sort 順で先頭）
+  preferredLayerId String?
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 
@@ -56,6 +66,8 @@ model User {
   auditLogs   AuditLog[]
   imports     Import[]
   duplicateIgnores DuplicateIgnore[]
+  joinRequests HouseholdJoinRequest[] @relation("JoinRequestUser")
+  decidedJoinRequests HouseholdJoinRequest[] @relation("JoinRequestDecider")
 }
 
 model Household {
@@ -72,6 +84,60 @@ model Household {
   imports      Import[]
   attachments  Attachment[]
   duplicateIgnores DuplicateIgnore[]
+  invites      HouseholdInvite[]
+  joinRequests HouseholdJoinRequest[]
+  layers       HouseholdLayer[]
+}
+
+model HouseholdLayer {
+  id          String   @id @default(cuid())
+  name        String
+  sortOrder   Int      @default(0)
+  createdAt   DateTime @default(now())
+
+  householdId String
+  household   Household @relation(fields: [householdId], references: [id], onDelete: Cascade)
+
+  transactions   Transaction[]
+  recurringRules RecurringRule[]
+  receipts       Receipt[]
+
+  @@index([householdId, sortOrder])
+}
+
+model HouseholdInvite {
+  id              String         @id @default(cuid())
+  token           String         @unique
+  householdId     String
+  household       Household      @relation(fields: [householdId], references: [id], onDelete: Cascade)
+  role            MembershipRole @default(editor)
+  createdByUserId String
+  expiresAt       DateTime
+  createdAt       DateTime       @default(now())
+
+  @@index([householdId])
+}
+
+model HouseholdJoinRequest {
+  id            String            @id @default(cuid())
+  status        JoinRequestStatus @default(pending)
+  requestedRole MembershipRole
+  createdAt     DateTime          @default(now())
+  decidedAt     DateTime?
+
+  householdId String
+  household   Household @relation(fields: [householdId], references: [id], onDelete: Cascade)
+
+  userId String
+  user   User @relation("JoinRequestUser", fields: [userId], references: [id], onDelete: Cascade)
+
+  decidedByUserId String?
+  decidedByUser   User?   @relation("JoinRequestDecider", fields: [decidedByUserId], references: [id], onDelete: SetNull)
+
+  inviteToken String?
+
+  @@unique([householdId, userId, status])
+  @@index([householdId, status, createdAt])
 }
 
 model Membership {
@@ -125,6 +191,9 @@ model Transaction {
   householdId String
   household   Household @relation(fields: [householdId], references: [id], onDelete: Cascade)
 
+  layerId String
+  layer   HouseholdLayer @relation(fields: [layerId], references: [id], onDelete: Restrict)
+
   splits      TransactionSplit[]
   refundFrom  Refund?            @relation("RefundOriginal")
   refundTo    Refund?            @relation("RefundRefund")
@@ -133,8 +202,8 @@ model Transaction {
   recurringRuleId String?
   recurringRule   RecurringRule? @relation(fields: [recurringRuleId], references: [id], onDelete: SetNull)
 
-  @@index([householdId, purchaseDate])
-  @@unique([householdId, generatedKind, generatedMonth, generatedKey])
+  @@index([householdId, layerId, purchaseDate])
+  @@unique([householdId, layerId, generatedKind, generatedMonth, generatedKey])
 }
 
 model RecurringRule {
@@ -152,12 +221,15 @@ model RecurringRule {
   householdId String
   household   Household @relation(fields: [householdId], references: [id], onDelete: Cascade)
 
+  layerId String
+  layer   HouseholdLayer @relation(fields: [layerId], references: [id], onDelete: Restrict)
+
   categoryId String?
   category   Category? @relation(fields: [categoryId], references: [id], onDelete: SetNull)
 
   transactions Transaction[]
 
-  @@index([householdId, isActive])
+  @@index([householdId, layerId, isActive])
 }
 
 model TransactionSplit {
@@ -202,10 +274,13 @@ model Receipt {
   householdId String
   household   Household @relation(fields: [householdId], references: [id], onDelete: Cascade)
 
+  layerId String
+  layer   HouseholdLayer @relation(fields: [layerId], references: [id], onDelete: Restrict)
+
   items       ReceiptItem[]
   attachments Attachment[]
 
-  @@index([householdId, createdAt])
+  @@index([householdId, layerId, createdAt])
 }
 
 model ReceiptItem {

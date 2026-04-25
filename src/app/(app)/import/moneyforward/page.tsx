@@ -1,5 +1,5 @@
 import { prisma } from "@/lib/db";
-import { requireAuthedContext, requireRole } from "@/lib/authz";
+import { requireAuthedContext, requireRole, scopedTx } from "@/lib/authz";
 import Papa from "papaparse";
 import { redirect } from "next/navigation";
 
@@ -36,7 +36,7 @@ function parseAmount(s: string) {
 }
 
 export default async function MoneyForwardImportPage() {
-  const ctx = await requireAuthedContext();
+  const ctx = await requireAuthedContext({ onUnauthorized: "redirect" });
   requireRole(ctx, "editor");
 
   return (
@@ -54,6 +54,7 @@ export default async function MoneyForwardImportPage() {
           "use server";
           const ctx = await requireAuthedContext();
           requireRole(ctx, "editor");
+          const txw = scopedTx(ctx);
 
           const file = formData.get("file");
           if (!(file instanceof File)) throw new Error("ファイルを選択してください。");
@@ -101,7 +102,7 @@ export default async function MoneyForwardImportPage() {
 
             const dup = await prisma.transaction.findFirst({
               where: {
-                householdId: ctx.householdId,
+                ...txw,
                 purchaseDate,
                 totalAmount,
                 type,
@@ -117,7 +118,8 @@ export default async function MoneyForwardImportPage() {
             txCreates.push(
               prisma.transaction.create({
                 data: {
-                  householdId: ctx.householdId,
+                  householdId: txw.householdId,
+                  layerId: txw.layerId,
                   type,
                   purchaseDate,
                   totalAmount,

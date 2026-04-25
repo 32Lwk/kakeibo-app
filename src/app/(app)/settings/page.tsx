@@ -6,33 +6,91 @@ import { ModalSelect } from "@/components/ModalSelect";
 import { ThemeAccentSelect } from "@/components/ThemeAccentSelect";
 import { DangerZone } from "@/components/DangerZone";
 import { requireAuthedContext, requireRole } from "@/lib/authz";
+import { SettingsUserHeader } from "@/components/settings/SettingsUserHeader";
 
 export const dynamic = "force-dynamic";
 
 export default async function SettingsPage() {
-  const session = await getSession();
-  const userId = (session?.user as any)?.id as string | undefined;
-  if (!userId) return null;
+  const ctx = await requireAuthedContext({ onUnauthorized: "redirect" });
 
-  const user = await prisma.user.findUnique({
-    where: { id: userId },
-    select: {
-      weekStartsOn: true,
-      email: true,
-      theme: true,
-      accent: true,
-      transactionSort: true,
-      summaryOrder: true,
-      carryoverEnabled: true,
-      carryoverNote: true,
-      recurringAutoApply: true,
-    },
-  });
-  if (!user) return null;
+  const [user, household, layers, invites, joinRequests] = await Promise.all([
+    prisma.user.findUnique({
+      where: { id: ctx.userId },
+      select: {
+        weekStartsOn: true,
+        email: true,
+        name: true,
+        image: true,
+        theme: true,
+        accent: true,
+        transactionSort: true,
+        summaryOrder: true,
+        carryoverEnabled: true,
+        carryoverNote: true,
+        recurringAutoApply: true,
+      },
+    }),
+    prisma.household.findUnique({
+      where: { id: ctx.householdId },
+      include: {
+        memberships: {
+          orderBy: { createdAt: "asc" },
+          include: {
+            user: { select: { id: true, name: true, email: true, image: true } },
+          },
+        },
+      },
+    }),
+    prisma.householdLayer.findMany({
+      where: { householdId: ctx.householdId },
+      orderBy: [{ sortOrder: "asc" }, { createdAt: "asc" }],
+      select: { id: true, name: true },
+    }),
+    ctx.role === "owner"
+      ? prisma.householdInvite.findMany({
+          where: { householdId: ctx.householdId, expiresAt: { gt: new Date() } },
+          orderBy: { createdAt: "desc" },
+          select: { id: true, token: true, role: true, expiresAt: true, createdAt: true },
+        })
+      : Promise.resolve([]),
+    ctx.role === "owner"
+      ? prisma.householdJoinRequest.findMany({
+          where: { householdId: ctx.householdId, status: "pending" },
+          orderBy: { createdAt: "desc" },
+          select: {
+            id: true,
+            requestedRole: true,
+            createdAt: true,
+            user: { select: { id: true, name: true, email: true, image: true } },
+          },
+        })
+      : Promise.resolve([]),
+  ]);
+
+  if (!user || !household) return null;
+
+  const members = household.memberships.map((m) => ({
+    id: m.user.id,
+    name: m.user.name,
+    email: m.user.email,
+    image: m.user.image,
+    role: m.role,
+  }));
 
   return (
     <div className="space-y-6">
       <h1 className="text-2xl font-semibold tracking-tight">設定</h1>
+
+      <SettingsUserHeader
+        user={{ name: user.name, email: user.email, image: user.image }}
+        household={{ id: household.id, name: household.name }}
+        membershipRole={ctx.role}
+        members={members}
+        layers={layers}
+        activeLayerId={ctx.activeLayerId}
+        invites={invites}
+        joinRequests={joinRequests}
+      />
 
       <section className="grid gap-3 md:grid-cols-2">
         <div className="rounded-2xl border border-black/10 bg-white p-6">
@@ -86,6 +144,7 @@ export default async function SettingsPage() {
           className="rounded-2xl border border-black/10 bg-white p-6"
           action={async (formData) => {
             "use server";
+            const actx = await requireAuthedContext();
             const theme = String(formData.get("theme") ?? "system");
             const accent = String(formData.get("accent") ?? "").trim() || null;
             const transactionSort = String(formData.get("transactionSort") ?? "date_desc");
@@ -102,7 +161,7 @@ export default async function SettingsPage() {
             if (![0, 1, 2, 3, 4, 5, 6].includes(weekStartsOn)) throw new Error("不正な値です。");
 
             await prisma.user.update({
-              where: { id: userId },
+              where: { id: actx.userId },
               data: {
                 theme,
                 accent,
@@ -117,8 +176,6 @@ export default async function SettingsPage() {
             redirect("/settings");
           }}
         >
-          <div className="text-sm text-black/60">ログイン中: {user.email}</div>
-
           <div className="mt-4 grid gap-4">
             <ThemeAccentSelect theme={user.theme} accent={user.accent ?? null} />
 
